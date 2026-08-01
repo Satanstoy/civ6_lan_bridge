@@ -488,6 +488,14 @@ async fn delete_peer(
         let room_id = router
             .room_id_for_code(&room_code)
             .ok_or_else(|| ApiError::NotFound("room does not exist".to_owned()))?;
+        let peer_room_id = router
+            .room_for_peer(peer_id)
+            .ok_or_else(|| ApiError::NotFound("peer does not exist".to_owned()))?;
+        if peer_room_id != room_id {
+            return Err(ApiError::Forbidden(
+                "peer belongs to another room".to_owned(),
+            ));
+        }
         let virtual_ip = router
             .peer_virtual_ip(peer_id)
             .ok_or_else(|| ApiError::NotFound("peer does not exist".to_owned()))?;
@@ -845,6 +853,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn cross_room_peer_delete_is_forbidden_and_preserves_peer() {
+        let app = build_router(AppState::new("test-token"));
+        for code in ["RMAAAA", "RMBBBB"] {
+            let response = app
+                .clone()
+                .oneshot(authorized_request(
+                    "POST",
+                    "/v1/rooms",
+                    &format!(r#"{{"room_code":"{code}"}}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let joined = app
+            .clone()
+            .oneshot(authorized_request("POST", "/v1/rooms/RMAAAA/join", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(joined.status(), StatusCode::CREATED);
+        let peer_body = joined.into_body().collect().await.unwrap().to_bytes();
+        let peer: PeerResponse = serde_json::from_slice(&peer_body).unwrap();
+
+        let cross_room_delete = app
+            .clone()
+            .oneshot(authorized_request(
+                "DELETE",
+                &format!("/v1/rooms/RMBBBB/peers/{}", peer.peer_id),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(cross_room_delete.status(), StatusCode::FORBIDDEN);
+
+        let status = app
+            .oneshot(authorized_request("GET", "/v1/rooms/RMAAAA/status", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let status_body = status.into_body().collect().await.unwrap().to_bytes();
+        let room: RoomResponse = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(room.member_count, 1);
     }
 
     #[tokio::test]
