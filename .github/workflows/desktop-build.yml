@@ -116,6 +116,28 @@ jobs:
             mac-client/PacketTunnel/Tests/ProtocolSmoke.swift \
             -o "$RUNNER_TEMP/civ6-lan-bridge-protocol-smoke"
           "$RUNNER_TEMP/civ6-lan-bridge-protocol-smoke"
+      - name: Validate macOS app icon format
+        run: |
+          python3 - <<'PY'
+          import struct
+
+          path = "mac-client/src-tauri/icons/icon.png"
+          with open(path, "rb") as icon:
+              if icon.read(8) != b"\x89PNG\r\n\x1a\n":
+                  raise SystemExit("macOS app icon is not a PNG")
+              length = struct.unpack(">I", icon.read(4))[0]
+              chunk = icon.read(4)
+              if chunk != b"IHDR" or length < 13:
+                  raise SystemExit("macOS app icon has no valid IHDR")
+              width, height, bit_depth, color_type = struct.unpack(">IIBB", icon.read(10))
+              if (width, height) != (1024, 1024):
+                  raise SystemExit(f"unexpected macOS app icon dimensions: {width}x{height}")
+              if (bit_depth, color_type) != (8, 6):
+                  raise SystemExit(
+                      f"macOS app icon must be 8-bit RGBA, got bit_depth={bit_depth}, color_type={color_type}"
+                  )
+          print("macOS app icon is 1024x1024 8-bit RGBA")
+          PY
       - name: Build unsigned Packet Tunnel extension target
         id: build-packet-tunnel
         continue-on-error: true
