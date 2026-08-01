@@ -10,6 +10,24 @@ use std::{
 
 use civ6_lan_router::RouterStats;
 
+const MAX_SEEN_PACKETS: usize = 65_536;
+const SEEN_PACKET_TTL: Duration = Duration::from_secs(60);
+const SEEN_PACKET_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+
+struct SeenPacketCache {
+    entries: HashMap<u64, Instant>,
+    last_cleanup: Instant,
+}
+
+impl Default for SeenPacketCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            last_cleanup: Instant::now(),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct RelayMetrics {
     received_packets: Arc<AtomicU64>,
@@ -19,7 +37,7 @@ pub struct RelayMetrics {
     authentication_failures: Arc<AtomicU64>,
     bytes_in: Arc<AtomicU64>,
     bytes_out: Arc<AtomicU64>,
-    seen_packets: Arc<Mutex<HashMap<u64, Instant>>>,
+    seen_packets: Arc<Mutex<SeenPacketCache>>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -51,10 +69,17 @@ impl RelayMetrics {
             .seen_packets
             .lock()
             .map(|mut seen| {
-                seen.retain(|_, timestamp| {
-                    now.duration_since(*timestamp) <= Duration::from_secs(60)
-                });
-                seen.insert(fingerprint, now).is_some()
+                if now.duration_since(seen.last_cleanup) >= SEEN_PACKET_CLEANUP_INTERVAL {
+                    seen.entries
+                        .retain(|_, timestamp| now.duration_since(*timestamp) <= SEEN_PACKET_TTL);
+                    seen.last_cleanup = now;
+                }
+                let duplicate = seen.entries.contains_key(&fingerprint);
+                if !duplicate && seen.entries.len() >= MAX_SEEN_PACKETS {
+                    seen.entries.clear();
+                }
+                seen.entries.insert(fingerprint, now);
+                duplicate
             })
             .unwrap_or(false);
         if duplicate {
@@ -95,5 +120,21 @@ impl RelayMetrics {
             active_hosts: router.active_hosts,
             authentication_failures: self.authentication_failures.load(Ordering::Relaxed),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RelayMetrics, MAX_SEEN_PACKETS};
+
+    #[test]
+    fn duplicate_fingerprint_cache_has_a_hard_bound() {
+        let metrics = RelayMetrics::default();
+        for packet_id in 0..(MAX_SEEN_PACKETS + 1_024) {
+            metrics.record_received(&packet_id.to_le_bytes());
+        }
+
+        let seen = metrics.seen_packets.lock().unwrap();
+        assert!(seen.entries.len() <= MAX_SEEN_PACKETS);
     }
 }
