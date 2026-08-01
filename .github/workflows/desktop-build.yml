@@ -136,6 +136,13 @@ jobs:
           name: civ6-lan-bridge-packet-tunnel-build-log-${{ matrix.arch }}
           path: ${{ runner.temp }}/packet-tunnel-xcodebuild.log
           if-no-files-found: error
+      - name: Summarize Packet Tunnel build log
+        if: always()
+        run: |
+          {
+            echo '### Packet Tunnel xcodebuild log (last 200 lines)'
+            tail -200 "$RUNNER_TEMP/packet-tunnel-xcodebuild.log"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Fail if Packet Tunnel build failed
         if: steps.build-packet-tunnel.outcome == 'failure'
         run: exit 1
