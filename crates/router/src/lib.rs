@@ -170,6 +170,14 @@ pub struct ExpirationReport {
     pub expired_gameplay_sessions: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RouterStats {
+    pub active_rooms: usize,
+    pub active_peers: usize,
+    pub active_hosts: usize,
+    pub active_gameplay_sessions: usize,
+}
+
 #[derive(Clone, Debug)]
 struct RoomState {
     code: RoomCode,
@@ -807,6 +815,15 @@ impl RoomRouter {
             .ok_or(RouterError::RoomNotFound(room_id))?
             .host_sessions
             .len())
+    }
+
+    pub fn stats(&self) -> RouterStats {
+        RouterStats {
+            active_rooms: self.rooms.len(),
+            active_peers: self.peers.len(),
+            active_hosts: self.hosts.len(),
+            active_gameplay_sessions: self.gameplay.len(),
+        }
     }
 
     fn member_state(&self, room_id: RoomId, peer_id: PeerId) -> Result<PeerState, RouterError> {

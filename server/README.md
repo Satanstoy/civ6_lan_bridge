@@ -55,4 +55,6 @@ Windows 正式客户端按 Microsoft Windows Filtering Platform 设计；WinDive
 
 Rust 数据面已提供绑定 `CIV6_RELAY_BIND` 的真实 UDP envelope relay。它不直接转发公网任意 UDP，而是只接受 WireGuard 虚拟地址对应的已登记 peer，并将 `request_id`、`host_session_id`、`gameplay_session_id` 和虚拟源地址带到客户端适配器。共享 client core 已通过真实 UDP socket probe 测试；systemd 应启动 `/usr/local/bin/civ6-lan-server`，而不是早期 Python prototype。Windows WFP 和 macOS Network Extension 的 Civ6 注入适配器尚未完成，因此当前仍不能宣称已经交付可直接进行 Civ6 联机的 `.exe`/`.dmg`。
 
+服务端可重复的 macOS transport-level runner 是 `scripts/mac-e2e-server-test.sh`，它启动正常 Rust 服务、生成临时 Bearer manifest、执行认证 UDP/房间 fan-out/隔离/TTL/错误路径测试，并生成脱敏的 `server-test-report.json`。没有真实第二个 Civ VI 客户端时，报告状态只能是 `partial`，`civ6_discovery` 必须保持 `not_tested`。
+
 relay envelope 的字段和方向见 [`docs/protocol.md`](../docs/protocol.md)；默认服务端 relay 端口为 `32000/UDP`，Civ VI 原始端口仍只允许 `62900-62999/UDP` 和 `62056/UDP`。

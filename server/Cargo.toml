@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 axum = "0.8"
 base64 = "0.22"
+civ6-lan-client-core = { path = "../crates/client-core" }
 civ6-lan-protocol = { path = "../crates/protocol" }
 civ6-lan-router = { path = "../crates/router" }
 serde = { version = "1", features = ["derive"] }
@@ -20,6 +21,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = "1"
 
 [dev-dependencies]
-civ6-lan-client-core = { path = "../crates/client-core" }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

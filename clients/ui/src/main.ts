@@ -44,6 +44,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
         <button id="join-room">加入房间</button>
         <button id="register-host">登记为房主</button>
         <button id="create-gameplay">建立游戏路由</button>
+        ${platform === "macos" ? '<button id="load-test-manifest">读取 macOS 测试 manifest</button>' : ""}
       </div>
       <pre id="status">未连接</pre>
     </main>
@@ -173,6 +174,26 @@ function render({ platform, invoke }: BridgeUiOptions): void {
       showResult(result);
     } catch (error) {
       status.textContent = `建立游戏路由失败：${String(error)}`;
+    }
+  });
+
+  document.getElementById("load-test-manifest")?.addEventListener("click", async () => {
+    status.textContent = "正在读取 CIV6_TEST_MANIFEST…";
+    try {
+      const manifest = await invoke("load_test_manifest", {});
+      const valueOf = (key: string): string => String((manifest as Record<string, unknown>)[key] ?? "");
+      input("control-url").value = valueOf("control_endpoint");
+      input("token").value = valueOf("token");
+      input("relay-server").value = `${valueOf("relay_host")}:${valueOf("relay_port")}`;
+      input("room-code").value = valueOf("room_code");
+      input("peer-id").value = valueOf("client_id");
+      input("local-bind").value = `${valueOf("client_virtual_ip")}:${valueOf("relay_port")}`;
+      showResult({
+        ...manifest as Record<string, unknown>,
+        token: "<loaded; hidden after this view>",
+      });
+    } catch (error) {
+      status.textContent = `读取测试 manifest 失败：${String(error)}`;
     }
   });
 }

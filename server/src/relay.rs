@@ -241,16 +241,27 @@ impl RelayServer {
         let mut expiration = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
-                received = self.socket.recv_from(&mut socket_buffer) => {
-                    let (length, source) = received?;
-                    match self.dispatcher.handle_datagram(source, &socket_buffer[..length]).await {
-                        Ok(outbound) => {
-                            for datagram in outbound {
-                                let packet = datagram.message.encode()?;
-                                self.socket.send_to(&packet, datagram.destination).await?;
+                    received = self.socket.recv_from(&mut socket_buffer) => {
+                        let (length, source) = received?;
+                        self.dispatcher.state.metrics.record_received(&socket_buffer[..length]);
+                        match self.dispatcher.handle_datagram(source, &socket_buffer[..length]).await {
+                            Ok(outbound) => {
+                                for datagram in outbound {
+                                    let packet = datagram.message.encode()?;
+                                    self.socket.send_to(&packet, datagram.destination).await?;
+                                    self.dispatcher.state.metrics.record_sent(packet.len());
+                                }
                             }
+                        Err(error) => {
+                            let authentication_failure = matches!(
+                                &error,
+                                RelayError::UnknownSource(_)
+                                    | RelayError::SourcePeerMismatch { .. }
+                                    | RelayError::Router(RouterError::UnauthorizedGameplayPeer(..))
+                            );
+                            self.dispatcher.state.metrics.record_drop(authentication_failure);
+                            tracing::debug!(%source, %error, "dropping invalid relay datagram");
                         }
-                        Err(error) => tracing::debug!(%source, %error, "dropping invalid relay datagram"),
                     }
                 }
                 _ = expiration.tick() => {

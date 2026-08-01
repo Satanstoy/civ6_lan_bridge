@@ -18,6 +18,22 @@ use tokio::net::UdpSocket;
 
 pub const DEFAULT_RELAY_PORT: u16 = 32_000;
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TestSessionManifest {
+    pub session_id: String,
+    pub room_id: RoomId,
+    pub room_code: RoomCode,
+    pub client_id: PeerId,
+    pub client_virtual_ip: VirtualIp,
+    pub relay_host: String,
+    pub relay_port: u16,
+    pub control_endpoint: String,
+    pub protocol_version: u8,
+    pub token: String,
+    pub expires_at: u64,
+    pub test_mode: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     pub control_url: String,
@@ -150,6 +166,49 @@ impl ControlClient {
         .await
     }
 
+    pub async fn room_status(&self, room_code: &RoomCode) -> Result<RoomResponse, ClientError> {
+        self.request(
+            reqwest::Method::GET,
+            &format!("/v1/rooms/{room_code}/status"),
+            &(),
+        )
+        .await
+    }
+
+    pub async fn relay_metrics(&self) -> Result<RelayMetricsResponse, ClientError> {
+        self.request(reqwest::Method::GET, "/v1/test/metrics", &())
+            .await
+    }
+
+    pub async fn delete_host(
+        &self,
+        room_code: &RoomCode,
+        host_session_id: HostSessionId,
+    ) -> Result<(), ClientError> {
+        self.request_empty(
+            reqwest::Method::DELETE,
+            &format!("/v1/rooms/{room_code}/hosts/{host_session_id}"),
+        )
+        .await
+    }
+
+    pub async fn delete_peer(
+        &self,
+        room_code: &RoomCode,
+        peer_id: PeerId,
+    ) -> Result<(), ClientError> {
+        self.request_empty(
+            reqwest::Method::DELETE,
+            &format!("/v1/rooms/{room_code}/peers/{peer_id}"),
+        )
+        .await
+    }
+
+    pub async fn delete_room(&self, room_code: &RoomCode) -> Result<(), ClientError> {
+        self.request_empty(reqwest::Method::DELETE, &format!("/v1/rooms/{room_code}"))
+            .await
+    }
+
     async fn request<T: DeserializeOwned, B: Serialize>(
         &self,
         method: reqwest::Method,
@@ -172,6 +231,25 @@ impl ControlClient {
             return Err(ClientError::HttpStatus { status, message });
         }
         response.json::<T>().await.map_err(ClientError::Http)
+    }
+
+    async fn request_empty(&self, method: reqwest::Method, path: &str) -> Result<(), ClientError> {
+        let response = self
+            .http
+            .request(method, format!("{}{}", self.config.control_url, path))
+            .bearer_auth(&self.config.bearer_token)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = response
+                .json::<ApiErrorResponse>()
+                .await
+                .map(|error| error.message)
+                .unwrap_or_else(|_| "control request failed".to_owned());
+            return Err(ClientError::HttpStatus { status, message });
+        }
+        Ok(())
     }
 }
 
@@ -313,6 +391,21 @@ pub struct GameplayResponse {
     pub host_peer_id: PeerId,
     pub client_virtual_ip: VirtualIp,
     pub host_virtual_ip: VirtualIp,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RelayMetricsResponse {
+    pub sent_packets: u64,
+    pub received_packets: u64,
+    pub dropped_packets: u64,
+    pub duplicated_packets: u64,
+    pub reordered_packets: u64,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub active_peers: usize,
+    pub active_rooms: usize,
+    pub active_hosts: usize,
+    pub authentication_failures: u64,
 }
 
 #[derive(Debug, Deserialize)]

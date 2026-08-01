@@ -5,6 +5,7 @@ pub use civ6_lan_router as router;
 
 pub mod api;
 pub mod db;
+pub mod metrics;
 pub mod relay;
 pub mod state;
 pub mod wireguard;

@@ -12,6 +12,7 @@ use civ6_lan_router::{GameplaySnapshot, HostSnapshot, RoomSnapshot, RouterError}
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    metrics::RelayMetricsSnapshot,
     state::{allocate_virtual_ip, parse_room_code, AppState},
     wireguard::WireGuardError,
 };
@@ -171,6 +172,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/v1/test/metrics", get(test_metrics))
         .route("/v1/rooms", post(create_room))
         .route("/v1/rooms/{code}/join", post(join_room))
         .route("/v1/rooms/{code}/status", get(room_status))
@@ -185,6 +187,7 @@ pub fn build_router(state: AppState) -> Router {
             delete(delete_host),
         )
         .route("/v1/rooms/{code}/peers/{peer_id}", delete(delete_peer))
+        .route("/v1/rooms/{code}", delete(delete_room))
         .with_state(state)
 }
 
@@ -209,6 +212,15 @@ async fn health_ready(State(state): State<AppState>) -> Response {
         }),
     )
         .into_response()
+}
+
+async fn test_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RelayMetricsSnapshot>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let router = state.router.read().await;
+    Ok(Json(state.metrics.snapshot(router.stats())))
 }
 
 async fn create_room(
@@ -264,7 +276,7 @@ async fn join_room(
         let room_id = router
             .room_id_for_code(&room_code)
             .ok_or_else(|| ApiError::NotFound("room does not exist".to_owned()))?;
-        let virtual_ip = allocate_virtual_ip(&router)
+        let virtual_ip = allocate_virtual_ip(&router, state.virtual_ip_prefix)
             .ok_or_else(|| ApiError::Conflict("virtual IP pool is exhausted".to_owned()))?;
         router.join_room(room_id, peer_id, virtual_ip)?;
         (room_id, virtual_ip)
@@ -522,6 +534,35 @@ async fn delete_peer(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn delete_room(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    require_bearer(&headers, &state)?;
+    let room_code = parse_room_code(&code).map_err(ApiError::BadRequest)?;
+    let room_id = {
+        let router = state.router.read().await;
+        let room_id = router
+            .room_id_for_code(&room_code)
+            .ok_or_else(|| ApiError::NotFound("room does not exist".to_owned()))?;
+        let snapshot = router.room_snapshot(room_id)?;
+        if snapshot.member_count != 0 || snapshot.host_count != 0 {
+            return Err(ApiError::Conflict("room is not empty".to_owned()));
+        }
+        room_id
+    };
+    if let Some(database) = state.database.as_ref() {
+        database
+            .delete_room(room_id)
+            .await
+            .map_err(|_| ApiError::Internal("database delete failed".to_owned()))?;
+    }
+    let mut router = state.router.write().await;
+    router.remove_empty_room(room_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn require_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     let expected = format!("Bearer {}", state.bearer_token);
     let provided = headers
@@ -530,6 +571,7 @@ fn require_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError>
     if provided == Some(expected.as_str()) {
         Ok(())
     } else {
+        state.metrics.record_authentication_failure();
         Err(ApiError::Unauthorized)
     }
 }
@@ -600,6 +642,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_requires_bearer_and_reports_auth_failures() {
+        let app = build_router(AppState::new("test-token"));
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/test/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(authorized_request("GET", "/v1/test/metrics", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let metrics: RelayMetricsSnapshot = serde_json::from_slice(&body).unwrap();
+        assert!(metrics.authentication_failures >= 1);
+        assert_eq!(metrics.active_rooms, 0);
+    }
+
+    #[tokio::test]
+    async fn room_delete_requires_an_empty_room() {
+        let app = build_router(AppState::new("test-token"));
+        let created = app
+            .clone()
+            .oneshot(authorized_request(
+                "POST",
+                "/v1/rooms",
+                r#"{"room_code":"RMDELE"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let joined = app
+            .clone()
+            .oneshot(authorized_request("POST", "/v1/rooms/RMDELE/join", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(joined.status(), StatusCode::CREATED);
+        let body = joined.into_body().collect().await.unwrap().to_bytes();
+        let peer: PeerResponse = serde_json::from_slice(&body).unwrap();
+
+        let non_empty_delete = app
+            .clone()
+            .oneshot(authorized_request("DELETE", "/v1/rooms/RMDELE", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(non_empty_delete.status(), StatusCode::CONFLICT);
+
+        let peer_delete = app
+            .clone()
+            .oneshot(authorized_request(
+                "DELETE",
+                &format!("/v1/rooms/RMDELE/peers/{}", peer.peer_id),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(peer_delete.status(), StatusCode::NO_CONTENT);
+
+        let room_delete = app
+            .clone()
+            .oneshot(authorized_request("DELETE", "/v1/rooms/RMDELE", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(room_delete.status(), StatusCode::NO_CONTENT);
+
+        let status = app
+            .oneshot(authorized_request("GET", "/v1/rooms/RMDELE/status", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

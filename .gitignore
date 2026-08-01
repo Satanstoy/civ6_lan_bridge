@@ -22,6 +22,7 @@ config/*.env
 # Local packet captures and runtime output
 captures/
 logs/
+server-test-report.json
 
 # Build and dependency output
 target/

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 
 use civ6_lan_client_core::{ClientConfig, ControlClient, RelayClient};
 use civ6_lan_protocol::{HostSessionId, PeerId, RoomCode};
@@ -31,6 +31,19 @@ pub struct RelayProbeResult {
     pub status: &'static str,
     pub local_bind: String,
     pub relay_server: String,
+}
+
+#[tauri::command]
+fn load_test_manifest(path: Option<String>) -> Result<civ6_lan_client_core::TestSessionManifest, String> {
+    let path = path
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("CIV6_TEST_MANIFEST").map(PathBuf::from))
+        .ok_or_else(|| "CIV6_TEST_MANIFEST is not set and no manifest path was supplied".to_owned())?;
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read test manifest {}: {error}", path.display()))?;
+    let manifest = serde_json::from_str(&content)
+        .map_err(|error| format!("invalid test manifest {}: {error}", path.display()))?;
+    Ok(manifest)
 }
 
 #[tauri::command]
@@ -135,7 +148,8 @@ pub fn run() {
             join_room,
             register_host,
             create_gameplay_session,
-            relay_probe
+            relay_probe,
+            load_test_manifest
         ])
         .run(tauri::generate_context!())
         .expect("error while running Civ6 LAN Bridge macOS client");

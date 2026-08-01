@@ -102,6 +102,7 @@ Rust 控制面和 UDP relay 当前可用环境变量：
 
     CIV6_CONTROL_BIND=127.0.0.1:8080
     CIV6_RELAY_BIND=10.240.0.1:32000
+    CIV6_RELAY_PORT=32000
     CIV6_CONTROL_BEARER_TOKEN=<至少 32 个随机字符>
     CIV6_DATABASE_URL=postgres://...
     CIV6_WIREGUARD_INTERFACE=wg0
@@ -109,6 +110,8 @@ Rust 控制面和 UDP relay 当前可用环境变量：
 数据库 migration 已保存于 `server/migrations/0001_control_plane.sql`。设置数据库后，房间、peer、host session 和 gameplay session 的 mutation 会写入 PostgreSQL；启动时恢复房间和 peer，清理旧 host/gameplay session，并重新向 WireGuard 接口写入已登记 peer。数据面每个包仍只查内存路由，不访问 PostgreSQL。
 
 `CIV6_RELAY_BIND` 绑定的是 WireGuard 虚拟接口地址，不应绑定公网网卡。它承载服务端和桌面适配器之间的版本化 relay envelope；客户端适配器负责将 envelope 还原为本机 Civ VI 的 discovery 或 gameplay UDP 包。
+
+服务端启动时会记录 control endpoint、relay endpoint、relay 端口、协议版本、构建 commit 和 PID。受 Bearer token 保护的 `/v1/test/metrics` 返回 relay 收发、丢弃、重复、字节数、活动 peer/room 和认证失败计数。macOS transport-level 验收合同见 [`docs/mac-e2e-test.md`](mac-e2e-test.md)；它不会把 synthetic fan-out 误报为 Civ VI 房间发现。
 
 ## 4. Client release pipeline
 

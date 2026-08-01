@@ -5,6 +5,7 @@ use civ6_lan_router::{RoomRouter, RouterConfig, RouterError};
 use tokio::sync::RwLock;
 
 use crate::db::{Database, PersistedState};
+use crate::metrics::RelayMetrics;
 use crate::wireguard::{WireGuardError, WireGuardManager};
 
 #[derive(Clone)]
@@ -14,6 +15,8 @@ pub struct AppState {
     pub database: Option<Database>,
     pub wireguard: Option<WireGuardManager>,
     pub peer_keys: Arc<RwLock<HashMap<PeerId, String>>>,
+    pub metrics: RelayMetrics,
+    pub virtual_ip_prefix: [u8; 3],
 }
 
 impl AppState {
@@ -24,6 +27,8 @@ impl AppState {
             database: None,
             wireguard: None,
             peer_keys: Arc::new(RwLock::new(HashMap::new())),
+            metrics: RelayMetrics::default(),
+            virtual_ip_prefix: [10, 240, 0],
         }
     }
 
@@ -34,6 +39,11 @@ impl AppState {
 
     pub fn with_wireguard(mut self, wireguard: WireGuardManager) -> Self {
         self.wireguard = Some(wireguard);
+        self
+    }
+
+    pub fn with_virtual_ip_prefix(mut self, prefix: [u8; 3]) -> Self {
+        self.virtual_ip_prefix = prefix;
         self
     }
 
@@ -70,9 +80,11 @@ impl AppState {
     }
 }
 
-pub fn allocate_virtual_ip(router: &RoomRouter) -> Option<VirtualIp> {
+pub fn allocate_virtual_ip(router: &RoomRouter, prefix: [u8; 3]) -> Option<VirtualIp> {
     (2..=254)
-        .map(|last_octet| VirtualIp::new(Ipv4Addr::new(10, 240, 0, last_octet)))
+        .map(|last_octet| {
+            VirtualIp::new(Ipv4Addr::new(prefix[0], prefix[1], prefix[2], last_octet))
+        })
         .find(|candidate| router.is_virtual_ip_available(*candidate))
 }
 
