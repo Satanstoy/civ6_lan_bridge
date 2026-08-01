@@ -26,6 +26,6 @@ must still embed the Rust transport sidecar, decode IPv4/UDP, and pass only UDP
 not become a generic proxy or silently forward all system traffic.
 
 Release prerequisites are the Network Extension entitlement, Developer ID
-signing, hardened runtime, notarization and staple. Test on Intel and Apple
-Silicon with Mac↔Windows and Mac↔Mac games, including the 2K age-verification
+signing, hardened runtime, notarization and staple. Test on Apple Silicon
+with Mac↔Windows and Mac↔Mac games, including the 2K age-verification
 precondition and repeated long games.

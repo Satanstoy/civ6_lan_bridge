@@ -82,8 +82,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
-            arch: x86_64
           - runner: macos-14
             arch: arm64
     runs-on: ${{ matrix.runner }}
@@ -199,13 +197,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p release
-          for spec in arm64:macos-arm64 x86_64:macos-intel; do
-            arch="${spec%%:*}"
-            asset_name="${spec#*:}"
-            source_dmg="$(find "release-artifacts/civ6-lan-bridge-macos-${arch}-dmg" -type f -name '*.dmg' -print -quit)"
-            test -n "$source_dmg"
-            cp "$source_dmg" "release/civ6-lan-bridge-${asset_name}.dmg"
-          done
+          source_dmg="$(find release-artifacts/civ6-lan-bridge-macos-arm64-dmg -type f -name '*.dmg' -print -quit)"
+          test -n "$source_dmg"
+          cp "$source_dmg" release/civ6-lan-bridge-macos-arm64.dmg
           shasum -a 256 release/*.dmg > release/SHA256SUMS
           cat > release/RELEASE_NOTES.md <<EOF
           ## Civ6 LAN Bridge ${GITHUB_REF_NAME}
@@ -213,7 +207,6 @@ jobs:
           macOS unsigned candidate packages built from commit ${GITHUB_SHA}.
 
           - Apple Silicon: \`civ6-lan-bridge-macos-arm64.dmg\`
-          - Intel: \`civ6-lan-bridge-macos-intel.dmg\`
           - Checksums: \`SHA256SUMS\`
 
           This is a test candidate. The Packet Tunnel/Civ VI data path and real

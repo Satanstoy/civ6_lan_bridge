@@ -174,7 +174,7 @@ macOS 客户端由 Tauri 2 + Rust core + Swift `NEPacketTunnelProvider` system e
 - 只把 Civ6 虚拟地址/指定路由送入隧道，不接管用户全部互联网流量；
 - 对 `255.255.255.255` discovery 包在本地转换后再送入服务端，不把不可路由广播直接发送到隧道。
 
-Apple 的 TN3120 明确支持 packet tunnel 用于把网络流量送入远端安全网络，但不建议用它在本地充当 listener/proxy。因此本项目把它实现为“到远端 relay 的包隧道”，不把 packet provider 设计成通用本地 UDP 代理。macOS 直接分发使用 system extension、Developer ID 签名和公证；Network Extension entitlement 是发布前置条件。由于 Aspyr macOS 移植版历史上存在跨平台联机差异，Phase 3 的真实 Intel/Apple Silicon 设备测试权重高于模拟器、单机或仅探针测试，必须包含 Mac↔Windows、Mac↔Mac、2K 验证和多人长局。
+Apple 的 TN3120 明确支持 packet tunnel 用于把网络流量送入远端安全网络，但不建议用它在本地充当 listener/proxy。因此本项目把它实现为“到远端 relay 的包隧道”，不把 packet provider 设计成通用本地 UDP 代理。macOS 直接分发使用 system extension、Developer ID 签名和公证；Network Extension entitlement 是发布前置条件。由于 Aspyr macOS 移植版历史上存在跨平台联机差异，Phase 3 的真实 Apple Silicon 设备测试权重高于模拟器、单机或仅探针测试，必须包含 Mac↔Windows、Mac↔Mac、2K 验证和多人长局。
 
 参考：[NEPacketTunnelProvider](https://developer.apple.com/documentation/networkextension/nepackettunnelprovider)、[TN3120](https://developer.apple.com/documentation/technotes/tn3120-expected-use-cases-for-network-extension-packet-tunnel-providers)、[TN3134](https://developer.apple.com/documentation/technotes/tn3134-network-extension-provider-deployment)。
 
@@ -184,7 +184,7 @@ Apple 的 TN3120 明确支持 packet tunnel 用于把网络流量送入远端安
 - Rust 后端；
 - TypeScript + Vite shared UI package；
 - Windows 输出 x64 NSIS `.exe`，后续可追加 `.msi`；
-- macOS 输出 Intel/Apple Silicon `.dmg`，候选包必须把 Packet Tunnel `.appex` 放入 App 的 `Contents/PlugIns`，建议同时提供 universal 构建；
+- macOS 输出 Apple Silicon ARM64 `.dmg`，候选包必须把 Packet Tunnel `.appex` 放入 App 的 `Contents/PlugIns`；
 - Windows 安装器、服务、驱动/组件都要签名；
 - Windows 安装器/服务自动放行 relay UDP、WireGuard 和 Civ6 相关的最小规则范围，并在卸载时清理规则；
 - macOS App、Network Extension 和 DMG 都要签名，并使用 `notarytool` 公证和 staple；
@@ -401,9 +401,9 @@ civ6-lan-bridge/
 
 - Tauri UI 和 Swift Network Extension；
 - PacketTunnel 只转发指定虚拟路由；
-- Intel/Apple Silicon 构建；
+- Apple Silicon ARM64 构建；
 - Developer ID、entitlements、notarization、staple；
-- macOS Intel/Apple Silicon 实机测试。
+- macOS Apple Silicon 实机测试。
 
 ### Phase 4：生产化和高可用
 
@@ -417,7 +417,7 @@ civ6-lan-bridge/
 
 一个版本只有同时满足以下条件才可称为可用版本：
 
-1. Windows 10/11 x64 与 macOS Intel/Apple Silicon 均可安装并完成鉴权；
+1. Windows 10/11 x64 与 macOS Apple Silicon 均可安装并完成鉴权；
 2. 两个不同网络的玩家加入同一个 room code；
 3. 任意一方创建 Civ VI 房间，另一方能在 Civ VI LAN 列表看到；
 4. 房间内其他成员创建的房间也能被正确区分和加入；

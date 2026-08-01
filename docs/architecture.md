@@ -75,5 +75,5 @@ macOS Civ6 ───┘                                      │
 Tauri 可以生成 macOS `.app/.dmg` 和 Windows NSIS `.exe/.msi`。建议使用 Windows/macOS CI runner 构建，不在服务端编译桌面客户端：
 
 - Windows runner：构建 x64，签名 EXE、DLL、驱动和安装器；当前 CI 先产出未签名候选 NSIS 包，并校验安装器资源和防火墙 hook；
-- macOS runner：分别构建 Intel/Apple Silicon，先构建未签名 Packet Tunnel `.appex`，通过 Tauri macOS `files` 配置嵌入 App 的 `Contents/PlugIns`，再在生产凭据可用时签名 Network Extension 和 App，生成 DMG，使用 `notarytool` 公证并 staple ticket；当前 provider 数据转发仍是 stub；
+- Apple Silicon macOS runner：构建 ARM64，先构建未签名 Packet Tunnel `.appex`，通过 Tauri macOS `files` 配置嵌入 App 的 `Contents/PlugIns`，再在生产凭据可用时签名 Network Extension 和 App，生成 DMG，使用 `notarytool` 公证并 staple ticket；当前 provider 数据转发仍是 stub；
 - 发布前上传 SHA-256、版本号和构建 commit，客户端只从受信发布地址更新。

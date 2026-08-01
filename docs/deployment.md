@@ -119,7 +119,7 @@ Rust 控制面和 UDP relay 当前可用环境变量：
 
 1. CI 从同一个 commit 检出 `server/`、`win-client/`、`mac-client/`；
 2. Windows runner 构建并签名 EXE、WFP/兼容网络组件和安装器；
-3. macOS runner 构建 Intel/Apple Silicon，签名 Network Extension 和 App，生成 DMG；
+3. Apple Silicon macOS runner 构建 ARM64，签名 Network Extension 和 App，生成 DMG；
 4. macOS 使用 Developer ID 和 `notarytool` 公证，随后 staple ticket；
 5. 发布 SHA-256、版本号和 Git commit；
 6. 服务端只提供版本清单和签名发布文件，不直接让客户端下载任意二进制。
@@ -129,7 +129,7 @@ Rust 控制面和 UDP relay 当前可用环境变量：
 GitHub Actions 的 `upload-artifact` 只适合 CI 内部交换；它会返回有时效的 Azure Blob 签名地址，不作为用户下载入口。带 `v*` tag 的构建会把 macOS DMG 和 `SHA256SUMS` 发布到 GitHub Release，下载地址稳定到该版本，例如：
 
 ```text
-https://github.com/Satanstoy/civ6_lan_bridge/releases/download/v0.1.0-test.2ff2064/civ6-lan-bridge-macos-arm64.dmg
+https://github.com/Satanstoy/civ6_lan_bridge/releases/download/v0.1.0-test.2ff2064-arm64/civ6-lan-bridge-macos-arm64.dmg
 ```
 
 当前 release job 生成的是未签名测试候选包。正式发布前仍必须配置 Developer ID、Network Extension 签名、notarization 和 staple；Release 资产的稳定 URL 不等于客户端已经通过 Civ VI 实机验收。
@@ -139,7 +139,7 @@ https://github.com/Satanstoy/civ6_lan_bridge/releases/download/v0.1.0-test.2ff20
 每个版本至少验证：
 
 - Windows 10/11 x64；
-- macOS Intel 和 Apple Silicon；
+- Apple Silicon macOS；
 - 家庭宽带、手机热点、校园/公司网络各一组；
 - 创建房间、刷新发现、加入房间、连续 30 回合；
 - 一方切换网络后的自动重连；

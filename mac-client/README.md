@@ -1,6 +1,6 @@
 # macOS client
 
-目标系统：macOS 12 及以上，同时发布 Intel 和 Apple Silicon 架构。
+目标系统：macOS 12 及以上，当前发布 Apple Silicon（ARM64）架构。
 
 macOS 端不能照搬 Windows DLL 注入，也不应该依赖旧的 TAP kernel extension。采用原生 Network Extension：
 
@@ -13,4 +13,4 @@ macOS 端不能照搬 Windows DLL 注入，也不应该依赖旧的 TAP kernel e
 
 `NEPacketTunnelProvider` 需要 Apple Network Extension entitlement，并且发布到用户机器时需要 Developer ID 签名、Hardened Runtime 和 notarization。DMG 只负责分发，真正的网络扩展也必须一起签名。
 
-开发构建需要 macOS + Xcode；Linux 机器不能验证 Network Extension，也不能生成可直接通过 Gatekeeper 的最终 DMG。GitHub Actions 会在 Intel/Apple Silicon runner 构建 DMG 候选，发布前仍必须在真实设备上测试 WireGuard 路由、Civ VI 本地网络权限、2K 年龄验证和房间发现；Aspyr 跨平台联机测试权重最高。
+开发构建需要 macOS + Xcode；Linux 机器不能验证 Network Extension，也不能生成可直接通过 Gatekeeper 的最终 DMG。GitHub Actions 会在 Apple Silicon runner 构建 ARM64 DMG 候选，发布前仍必须在真实设备上测试 WireGuard 路由、Civ VI 本地网络权限、2K 年龄验证和房间发现；Aspyr 跨平台联机测试权重最高。
