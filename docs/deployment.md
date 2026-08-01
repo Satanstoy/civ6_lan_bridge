@@ -124,6 +124,16 @@ Rust 控制面和 UDP relay 当前可用环境变量：
 5. 发布 SHA-256、版本号和 Git commit；
 6. 服务端只提供版本清单和签名发布文件，不直接让客户端下载任意二进制。
 
+### 4.1 Stable download channel
+
+GitHub Actions 的 `upload-artifact` 只适合 CI 内部交换；它会返回有时效的 Azure Blob 签名地址，不作为用户下载入口。带 `v*` tag 的构建会把 macOS DMG 和 `SHA256SUMS` 发布到 GitHub Release，下载地址稳定到该版本，例如：
+
+```text
+https://github.com/Satanstoy/civ6_lan_bridge/releases/download/v0.1.0-test.2ff2064/civ6-lan-bridge-macos-arm64.dmg
+```
+
+当前 release job 生成的是未签名测试候选包。正式发布前仍必须配置 Developer ID、Network Extension 签名、notarization 和 staple；Release 资产的稳定 URL 不等于客户端已经通过 Civ VI 实机验收。
+
 ## 5. Acceptance test
 
 每个版本至少验证：

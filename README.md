@@ -103,7 +103,7 @@ sudo systemctl restart civ6-relay
 
 `win-client/` 和 `mac-client/` 使用各自的 Tauri 原生壳，但 UI 入口、样式和 TypeScript 编译配置来自 `clients/ui/`。因此 UI 修改只维护一份；平台差异只能进入 Tauri Rust 命令、Windows WFP 或 macOS Network Extension。
 
-本仓库的 `.github/workflows/desktop-build.yml` 在 Windows runner 生成 NSIS `.exe`，在 macOS Intel/Apple Silicon runner 生成 DMG，并把未签名 Packet Tunnel `.appex` 嵌入候选 App 的 `Contents/PlugIns`，同时上传扩展校验制品。当前 Linux 环境不能生成真实 Windows/macOS 制品；在 WFP/Packet Tunnel 数据转发和签名完成前，这些 CI 制品仍是候选包，不代表 Civ VI 端到端联机已验收。
+本仓库的 `.github/workflows/desktop-build.yml` 在 Windows runner 生成 NSIS `.exe`，在 macOS Intel/Apple Silicon runner 生成 DMG，并把未签名 Packet Tunnel `.appex` 嵌入候选 App 的 `Contents/PlugIns`。普通分支构建只上传 CI artifact；推送 `v*` tag 时，release job 会把两个 macOS DMG 和 `SHA256SUMS` 发布到 GitHub Release，避免把临时 Azure Blob artifact URL 当成用户下载地址。当前 Linux 环境不能生成真实 Windows/macOS 制品；在 WFP/Packet Tunnel 数据转发和签名完成前，这些仍是候选包，不代表 Civ VI 端到端联机已验收。
 
 ## Windows 客户端流程（旧版手工验证）
 
