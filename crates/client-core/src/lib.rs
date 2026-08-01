@@ -33,6 +33,10 @@ impl ClientConfig {
         }
         self
     }
+
+    pub fn relay_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.relay_server.ip(), self.relay_port)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -386,5 +390,16 @@ mod tests {
         }
         .normalize_control_url();
         assert_eq!(config.control_url, "https://example.test");
+    }
+
+    #[test]
+    fn relay_port_overrides_the_port_in_the_server_setting() {
+        let config = ClientConfig {
+            control_url: "http://127.0.0.1:8080".to_owned(),
+            bearer_token: "token".to_owned(),
+            relay_server: "10.240.0.1:9999".parse().unwrap(),
+            relay_port: 32_001,
+        };
+        assert_eq!(config.relay_addr(), "10.240.0.1:32001".parse().unwrap());
     }
 }

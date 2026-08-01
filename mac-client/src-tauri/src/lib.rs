@@ -109,7 +109,7 @@ async fn relay_probe(
     local_bind: String,
 ) -> Result<RelayProbeResult, String> {
     let config = settings.config()?;
-    let relay_server = config.relay_server;
+    let relay_server = config.relay_addr();
     let local_bind = local_bind
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid local bind address: {error}"))?;
