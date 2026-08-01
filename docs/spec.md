@@ -184,7 +184,7 @@ Apple 的 TN3120 明确支持 packet tunnel 用于把网络流量送入远端安
 - Rust 后端；
 - TypeScript + Vite shared UI package；
 - Windows 输出 x64 NSIS `.exe`，后续可追加 `.msi`；
-- macOS 输出 Intel/Apple Silicon `.dmg`，建议同时提供 universal 构建；
+- macOS 输出 Intel/Apple Silicon `.dmg`，候选包必须把 Packet Tunnel `.appex` 放入 App 的 `Contents/PlugIns`，建议同时提供 universal 构建；
 - Windows 安装器、服务、驱动/组件都要签名；
 - Windows 安装器/服务自动放行 relay UDP、WireGuard 和 Civ6 相关的最小规则范围，并在卸载时清理规则；
 - macOS App、Network Extension 和 DMG 都要签名，并使用 `notarytool` 公证和 staple；

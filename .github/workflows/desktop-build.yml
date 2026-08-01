@@ -60,6 +60,13 @@ jobs:
           name: civ6-lan-bridge-windows-exe
           path: win-client/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
+      - name: Validate Windows installer candidate
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem win-client/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          if ($installer.Length -lt 1000000) {
+            throw "Windows installer is unexpectedly small: $($installer.Length) bytes"
+          }
       - name: Hash Windows installer
         shell: pwsh
         run: |
@@ -124,6 +131,11 @@ jobs:
       - name: Build macOS DMG candidate
         working-directory: mac-client
         run: npm run tauri build -- --ci --no-sign --config src-tauri/tauri.ci.conf.json
+      - name: Validate Packet Tunnel is embedded in the candidate App
+        run: |
+          APP_PATH="$(find mac-client/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          test -d "$APP_PATH/Contents/PlugIns/PacketTunnel.appex"
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
