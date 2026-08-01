@@ -124,8 +124,9 @@ jobs:
             -target PacketTunnel \
             -configuration Release \
             -sdk macosx \
+            -destination generic/platform=macOS \
             -derivedDataPath "mac-client/PacketTunnel/.build/${{ matrix.arch }}" \
-            ARCHS=${{ matrix.arch }} \
+            -arch "${{ matrix.arch }}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build 2>&1 | tee "$RUNNER_TEMP/packet-tunnel-xcodebuild.log"
