@@ -1,4 +1,9 @@
-use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::Ipv4Addr,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use civ6_lan_protocol::{PeerId, RoomCode, VirtualIp};
 use civ6_lan_router::{RoomRouter, RouterConfig, RouterError};
@@ -8,6 +13,54 @@ use crate::db::{Database, PersistedState};
 use crate::metrics::RelayMetrics;
 use crate::wireguard::{WireGuardError, WireGuardManager};
 
+const API_REQUESTS_PER_SECOND: u64 = 120;
+const UDP_PACKETS_PER_SECOND: u64 = 2_000;
+
+#[derive(Clone)]
+pub struct FixedWindowRateLimiter {
+    limit: u64,
+    window: Duration,
+    entries: Arc<Mutex<HashMap<String, RateWindow>>>,
+}
+
+#[derive(Clone, Copy)]
+struct RateWindow {
+    started_at: Instant,
+    count: u64,
+}
+
+impl FixedWindowRateLimiter {
+    pub fn new(limit: u64, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            entries: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn allow(&self, key: impl Into<String>) -> bool {
+        let key = key.into();
+        let now = Instant::now();
+        let Ok(mut entries) = self.entries.lock() else {
+            return true;
+        };
+        entries.retain(|_, entry| now.duration_since(entry.started_at) < self.window);
+        let entry = entries.entry(key).or_insert(RateWindow {
+            started_at: now,
+            count: 0,
+        });
+        if now.duration_since(entry.started_at) >= self.window {
+            entry.started_at = now;
+            entry.count = 0;
+        }
+        if entry.count >= self.limit {
+            return false;
+        }
+        entry.count += 1;
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub router: Arc<RwLock<RoomRouter>>,
@@ -16,6 +69,8 @@ pub struct AppState {
     pub wireguard: Option<WireGuardManager>,
     pub peer_keys: Arc<RwLock<HashMap<PeerId, String>>>,
     pub metrics: RelayMetrics,
+    pub api_rate_limiter: FixedWindowRateLimiter,
+    pub udp_rate_limiter: FixedWindowRateLimiter,
     pub virtual_ip_prefix: [u8; 3],
 }
 
@@ -28,6 +83,14 @@ impl AppState {
             wireguard: None,
             peer_keys: Arc::new(RwLock::new(HashMap::new())),
             metrics: RelayMetrics::default(),
+            api_rate_limiter: FixedWindowRateLimiter::new(
+                API_REQUESTS_PER_SECOND,
+                Duration::from_secs(1),
+            ),
+            udp_rate_limiter: FixedWindowRateLimiter::new(
+                UDP_PACKETS_PER_SECOND,
+                Duration::from_secs(1),
+            ),
             virtual_ip_prefix: [10, 240, 0],
         }
     }

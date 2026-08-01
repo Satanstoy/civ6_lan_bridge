@@ -21,6 +21,14 @@ pub struct RouterConfig {
     pub host_ttl: Duration,
     pub discovery_ttl: Duration,
     pub gameplay_idle_ttl: Duration,
+    pub peer_ttl: Duration,
+    pub peer_grace_ttl: Duration,
+    pub safe_payload_size: usize,
+    pub max_rooms: usize,
+    pub max_peers_per_room: usize,
+    pub max_total_peers: usize,
+    pub max_hosts_per_room: usize,
+    pub max_gameplay_sessions: usize,
 }
 
 impl Default for RouterConfig {
@@ -29,6 +37,14 @@ impl Default for RouterConfig {
             host_ttl: Duration::from_secs(15),
             discovery_ttl: Duration::from_secs(5),
             gameplay_idle_ttl: Duration::from_secs(30),
+            peer_ttl: Duration::from_secs(15),
+            peer_grace_ttl: Duration::from_secs(45),
+            safe_payload_size: civ6_lan_protocol::relay::DEFAULT_SAFE_RELAY_PAYLOAD_SIZE,
+            max_rooms: 1_024,
+            max_peers_per_room: 64,
+            max_total_peers: 4_096,
+            max_hosts_per_room: 64,
+            max_gameplay_sessions: 4_096,
         }
     }
 }
@@ -43,6 +59,12 @@ pub enum RouterError {
     DuplicateRoomId(RoomId),
     #[error("room {0} is not empty")]
     RoomNotEmpty(RoomId),
+    #[error("room capacity limit has been reached")]
+    RoomLimitReached,
+    #[error("room {0} has reached its peer capacity limit")]
+    RoomPeerLimitReached(RoomId),
+    #[error("server peer capacity limit has been reached")]
+    PeerLimitReached,
     #[error("peer {0} is already a member of a room")]
     PeerAlreadyInRoom(PeerId),
     #[error("peer {0} is not a member of room {1}")]
@@ -57,14 +79,24 @@ pub enum RouterError {
     HostNotInRoom(HostSessionId, RoomId),
     #[error("host session {0} is expired")]
     HostExpired(HostSessionId),
+    #[error("room {0} has reached its host capacity limit")]
+    HostLimitReached(RoomId),
+    #[error("peer {0} is temporarily disconnected and must resume its session")]
+    PeerDisconnected(PeerId),
+    #[error("peer {0} was outside the recovery grace period")]
+    PeerGraceExpired(PeerId),
     #[error("discovery request {0} was not found")]
     DiscoveryNotFound(DiscoveryRequestId),
     #[error("discovery request {0} is expired")]
     DiscoveryExpired(DiscoveryRequestId),
+    #[error("discovery request {0} was reused by a different peer or port")]
+    DiscoveryRequestConflict(DiscoveryRequestId),
     #[error("gameplay session {0} was not found")]
     GameplayNotFound(GameplaySessionId),
     #[error("peer {0} is not authorized for gameplay session {1}")]
     UnauthorizedGameplayPeer(PeerId, GameplaySessionId),
+    #[error("gameplay session capacity limit has been reached")]
+    GameplayLimitReached,
     #[error("UDP port {0} is not a Civ VI discovery port")]
     InvalidDiscoveryPort(u16),
     #[error("UDP port {0} is not the Civ VI gameplay port")]
@@ -94,6 +126,14 @@ pub struct HostSnapshot {
     pub room_id: RoomId,
     pub peer_id: PeerId,
     pub virtual_ip: VirtualIp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PeerSnapshot {
+    pub room_id: RoomId,
+    pub peer_id: PeerId,
+    pub virtual_ip: VirtualIp,
+    pub connection_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +214,7 @@ pub struct ExpirationReport {
 pub struct RouterStats {
     pub active_rooms: usize,
     pub active_peers: usize,
+    pub suspended_peers: usize,
     pub active_hosts: usize,
     pub active_gameplay_sessions: usize,
 }
@@ -189,6 +230,9 @@ struct RoomState {
 struct PeerState {
     room_id: RoomId,
     virtual_ip: VirtualIp,
+    last_seen: Instant,
+    disconnected_at: Option<Instant>,
+    connection_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -204,6 +248,7 @@ struct HostState {
 struct DiscoveryState {
     room_id: RoomId,
     client_peer_id: PeerId,
+    destination_port: Civ6UdpPort,
     expires_at: Instant,
 }
 
@@ -333,6 +378,9 @@ impl RoomRouter {
         room_id: RoomId,
         code: RoomCode,
     ) -> Result<(), RouterError> {
+        if self.rooms.len() >= self.config.max_rooms {
+            return Err(RouterError::RoomLimitReached);
+        }
         if self.rooms_by_code.contains_key(&code) {
             return Err(RouterError::DuplicateRoomCode(code));
         }
@@ -411,6 +459,16 @@ impl RoomRouter {
         peer_id: PeerId,
         virtual_ip: VirtualIp,
     ) -> Result<(), RouterError> {
+        let room = self
+            .rooms
+            .get(&room_id)
+            .ok_or(RouterError::RoomNotFound(room_id))?;
+        if room.members.len() >= self.config.max_peers_per_room {
+            return Err(RouterError::RoomPeerLimitReached(room_id));
+        }
+        if self.peers.len() >= self.config.max_total_peers {
+            return Err(RouterError::PeerLimitReached);
+        }
         if !self.rooms.contains_key(&room_id) {
             return Err(RouterError::RoomNotFound(room_id));
         }
@@ -425,12 +483,16 @@ impl RoomRouter {
             .rooms
             .get_mut(&room_id)
             .expect("room existence was checked above");
+        let now = Instant::now();
         room.members.insert(peer_id);
         self.peers.insert(
             peer_id,
             PeerState {
                 room_id,
                 virtual_ip,
+                last_seen: now,
+                disconnected_at: None,
+                connection_epoch: 1,
             },
         );
         self.virtual_ips.insert(virtual_ip, peer_id);
@@ -444,6 +506,72 @@ impl RoomRouter {
         virtual_ip: VirtualIp,
     ) -> Result<(), RouterError> {
         self.join_room(room_id, peer_id, virtual_ip)
+    }
+
+    /// Record activity from an already authenticated peer. A peer in the
+    /// recovery window must use `resume_peer` first so an old UDP path cannot
+    /// silently resurrect the session.
+    pub fn mark_peer_seen(&mut self, peer_id: PeerId, now: Instant) -> Result<(), RouterError> {
+        let peer = self
+            .peers
+            .get_mut(&peer_id)
+            .ok_or(RouterError::PeerNotFound(peer_id))?;
+        if peer.disconnected_at.is_some() {
+            return Err(RouterError::PeerDisconnected(peer_id));
+        }
+        peer.last_seen = now;
+        Ok(())
+    }
+
+    pub fn peer_connection_epoch(&self, peer_id: PeerId) -> Result<u64, RouterError> {
+        self.peers
+            .get(&peer_id)
+            .map(|peer| peer.connection_epoch)
+            .ok_or(RouterError::PeerNotFound(peer_id))
+    }
+
+    pub fn peer_snapshot(&self, peer_id: PeerId) -> Result<PeerSnapshot, RouterError> {
+        let peer = self
+            .peers
+            .get(&peer_id)
+            .ok_or(RouterError::PeerNotFound(peer_id))?;
+        Ok(PeerSnapshot {
+            room_id: peer.room_id,
+            peer_id,
+            virtual_ip: peer.virtual_ip,
+            connection_epoch: peer.connection_epoch,
+        })
+    }
+
+    /// Re-authenticate a peer without allocating a new peer ID or virtual IP.
+    /// The incremented epoch makes packets from the previous path invalid.
+    pub fn resume_peer(
+        &mut self,
+        room_id: RoomId,
+        peer_id: PeerId,
+        now: Instant,
+    ) -> Result<PeerSnapshot, RouterError> {
+        let peer = self
+            .peers
+            .get_mut(&peer_id)
+            .ok_or(RouterError::PeerNotFound(peer_id))?;
+        if peer.room_id != room_id {
+            return Err(RouterError::PeerNotInRoom(peer_id, room_id));
+        }
+        if let Some(disconnected_at) = peer.disconnected_at {
+            if disconnected_at + self.config.peer_grace_ttl <= now {
+                return Err(RouterError::PeerGraceExpired(peer_id));
+            }
+            peer.connection_epoch = peer.connection_epoch.saturating_add(1).max(1);
+            peer.disconnected_at = None;
+        }
+        peer.last_seen = now;
+        Ok(PeerSnapshot {
+            room_id: peer.room_id,
+            peer_id,
+            virtual_ip: peer.virtual_ip,
+            connection_epoch: peer.connection_epoch,
+        })
     }
 
     pub fn leave_room(&mut self, room_id: RoomId, peer_id: PeerId) -> Result<(), RouterError> {
@@ -518,6 +646,16 @@ impl RoomRouter {
                 }
             }
             self.remove_host(existing_id);
+        }
+
+        let host_count = self
+            .rooms
+            .get(&room_id)
+            .expect("room was checked above")
+            .host_sessions
+            .len();
+        if host_count >= self.config.max_hosts_per_room {
+            return Err(RouterError::HostLimitReached(room_id));
         }
 
         let session_id = HostSessionId::new();
@@ -610,14 +748,26 @@ impl RoomRouter {
             return Err(RouterError::InvalidDiscoveryPort(destination_port.0));
         }
         self.member_state(room_id, client_peer_id)?;
-        self.discoveries.insert(
-            request_id,
-            DiscoveryState {
-                room_id,
-                client_peer_id,
-                expires_at: now + self.config.discovery_ttl,
-            },
-        );
+        if let Some(existing) = self.discoveries.get_mut(&request_id) {
+            if existing.room_id != room_id
+                || existing.client_peer_id != client_peer_id
+                || existing.destination_port != destination_port
+            {
+                return Err(RouterError::DiscoveryRequestConflict(request_id));
+            }
+            // A retry refreshes the short cache window and is fan-out safe.
+            existing.expires_at = now + self.config.discovery_ttl;
+        } else {
+            self.discoveries.insert(
+                request_id,
+                DiscoveryState {
+                    room_id,
+                    client_peer_id,
+                    destination_port,
+                    expires_at: now + self.config.discovery_ttl,
+                },
+            );
+        }
 
         let targets = self
             .rooms
@@ -685,6 +835,10 @@ impl RoomRouter {
         }
         if host.expires_at <= now {
             return Err(RouterError::HostExpired(host_session_id));
+        }
+
+        if self.gameplay.len() >= self.config.max_gameplay_sessions {
+            return Err(RouterError::GameplayLimitReached);
         }
 
         let session_id = GameplaySessionId::new();
@@ -801,6 +955,33 @@ impl RoomRouter {
             self.gameplay.remove(&session_id);
         }
 
+        let disconnected_peers: Vec<_> = self
+            .peers
+            .iter()
+            .filter_map(|(peer_id, peer)| {
+                (peer.disconnected_at.is_none() && peer.last_seen + self.config.peer_ttl <= now)
+                    .then_some(*peer_id)
+            })
+            .collect();
+        for peer_id in disconnected_peers {
+            self.disconnect_peer(peer_id, now);
+        }
+
+        let expired_peers: Vec<_> = self
+            .peers
+            .iter()
+            .filter_map(|(peer_id, peer)| {
+                peer.disconnected_at
+                    .filter(|disconnected_at| *disconnected_at + self.config.peer_grace_ttl <= now)
+                    .map(|_| *peer_id)
+            })
+            .collect();
+        for peer_id in expired_peers {
+            if let Some(peer) = self.peers.get(&peer_id).copied() {
+                let _ = self.leave_room(peer.room_id, peer_id);
+            }
+        }
+
         ExpirationReport {
             expired_hosts: expired_host_count,
             expired_discoveries: expired_discovery_count,
@@ -821,6 +1002,11 @@ impl RoomRouter {
         RouterStats {
             active_rooms: self.rooms.len(),
             active_peers: self.peers.len(),
+            suspended_peers: self
+                .peers
+                .values()
+                .filter(|peer| peer.disconnected_at.is_some())
+                .count(),
             active_hosts: self.hosts.len(),
             active_gameplay_sessions: self.gameplay.len(),
         }
@@ -846,10 +1032,31 @@ impl RoomRouter {
     }
 
     fn validate_payload(&self, payload: &[u8]) -> Result<(), RouterError> {
-        if payload.len() > MAX_CIV6_DATAGRAM_SIZE {
+        if payload.len() > MAX_CIV6_DATAGRAM_SIZE || payload.len() > self.config.safe_payload_size {
             return Err(RouterError::DatagramTooLarge(payload.len()));
         }
         Ok(())
+    }
+
+    fn disconnect_peer(&mut self, peer_id: PeerId, now: Instant) {
+        let Some(peer) = self.peers.get_mut(&peer_id) else {
+            return;
+        };
+        peer.disconnected_at = Some(now);
+
+        let host_ids: Vec<_> = self
+            .hosts
+            .iter()
+            .filter_map(|(id, host)| (host.peer_id == peer_id).then_some(*id))
+            .collect();
+        for host_id in host_ids {
+            self.remove_host(host_id);
+        }
+        self.gameplay.retain(|_, session| {
+            session.client_peer_id != peer_id && session.host_peer_id != peer_id
+        });
+        self.discoveries
+            .retain(|_, discovery| discovery.client_peer_id != peer_id);
     }
 
     fn remove_host(&mut self, host_session_id: HostSessionId) {
@@ -969,6 +1176,7 @@ mod tests {
             host_ttl: Duration::from_secs(10),
             discovery_ttl: Duration::from_secs(15),
             gameplay_idle_ttl: Duration::from_secs(20),
+            ..RouterConfig::default()
         };
         let mut router = RoomRouter::new(config);
         let room_a = router.create_room(code("RMCCCC")).unwrap();
@@ -1007,6 +1215,8 @@ mod tests {
             host_ttl: Duration::from_secs(60),
             discovery_ttl: Duration::from_secs(5),
             gameplay_idle_ttl: Duration::from_secs(20),
+            peer_ttl: Duration::from_secs(60),
+            ..RouterConfig::default()
         };
         let mut router = RoomRouter::new(config);
         let room = router.create_room(code("RMGAME")).unwrap();
@@ -1078,5 +1288,59 @@ mod tests {
             }),
             Err(RouterError::DatagramTooLarge(MAX_CIV6_DATAGRAM_SIZE + 1))
         );
+    }
+
+    #[test]
+    fn discovery_retry_reuses_cached_request_without_creating_a_second_entry() {
+        let (mut router, room_a, _, peer_a1, _, _) = setup_router();
+        let now = Instant::now();
+        router.register_host(room_a, peer_a1, now).unwrap();
+        let request_id = DiscoveryRequestId::new();
+        let first = router
+            .begin_discovery(room_a, peer_a1, request_id, Civ6UdpPort(62_900), now)
+            .unwrap();
+        let retry = router
+            .begin_discovery(
+                room_a,
+                peer_a1,
+                request_id,
+                Civ6UdpPort(62_900),
+                now + Duration::from_millis(250),
+            )
+            .unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(
+            router.begin_discovery(room_a, peer_a1, request_id, Civ6UdpPort(62_901), now,),
+            Err(RouterError::DiscoveryRequestConflict(request_id))
+        );
+    }
+
+    #[test]
+    fn peer_resume_keeps_identity_and_rotates_connection_epoch() {
+        let config = RouterConfig {
+            peer_ttl: Duration::from_secs(15),
+            peer_grace_ttl: Duration::from_secs(45),
+            ..RouterConfig::default()
+        };
+        let mut router = RoomRouter::new(config);
+        let room = router.create_room(code("RMRESM")).unwrap();
+        let peer = PeerId::new();
+        let virtual_ip = ip("10.240.0.20");
+        router.join_room(room, peer, virtual_ip).unwrap();
+        let joined = Instant::now();
+        router.mark_peer_seen(peer, joined).unwrap();
+
+        router.expire(joined + Duration::from_secs(16));
+        assert_eq!(
+            router.mark_peer_seen(peer, joined + Duration::from_secs(17)),
+            Err(RouterError::PeerDisconnected(peer))
+        );
+        let resumed = router
+            .resume_peer(room, peer, joined + Duration::from_secs(17))
+            .unwrap();
+        assert_eq!(resumed.peer_id, peer);
+        assert_eq!(resumed.virtual_ip, virtual_ip);
+        assert_eq!(resumed.connection_epoch, 2);
+        assert_eq!(router.room_for_peer(peer), Some(room));
     }
 }

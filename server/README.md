@@ -19,11 +19,14 @@ Phase 1 已加入 Rust 控制面入口和 WireGuard peer 命令适配：
     GET    /v1/rooms/{code}/status
     POST   /v1/rooms/{code}/hosts
     POST   /v1/rooms/{code}/heartbeat
+    POST   /v1/rooms/{code}/resume
     POST   /v1/rooms/{code}/gameplay-sessions
     DELETE /v1/rooms/{code}/hosts/{host_session_id}
     DELETE /v1/rooms/{code}/peers/{peer_id}
 
 所有 /v1 接口要求 Authorization: Bearer ...。设置 `CIV6_DATABASE_URL` 后，房间、peer、host session 和 gameplay session 的控制面 mutation 会写入 PostgreSQL；启动时恢复房间、peer、虚拟 IP 和 WireGuard peer，旧 host/gameplay session 会被清理并要求客户端重新建立。
+
+客户端恢复连接时使用 `/v1/rooms/{code}/resume` 保留原来的 `peer_id` 和虚拟 IP；服务端只在 45 秒恢复窗口内接受恢复，并为新链路生成新的 `connection_epoch`。UDP relay 每 2 秒探测一次，连续 3 次失败后客户端按 250ms、500ms、1s、2s、4s、8s 退避重连。WireGuard peer 使用 25 秒 `PersistentKeepalive`。
 
 ## 任意成员开房的路由模型
 
@@ -53,7 +56,7 @@ Windows 正式客户端按 Microsoft Windows Filtering Platform 设计；WinDive
 
 部署时只把控制 API 放在 HTTPS 后面；Civ VI UDP relay 只接受 WireGuard peer 来源，不暴露为公网开放 UDP 转发器。
 
-Rust 数据面已提供绑定 `CIV6_RELAY_BIND` 的真实 UDP envelope relay。它不直接转发公网任意 UDP，而是只接受 WireGuard 虚拟地址对应的已登记 peer，并将 `request_id`、`host_session_id`、`gameplay_session_id` 和虚拟源地址带到客户端适配器。共享 client core 已通过真实 UDP socket probe 测试；systemd 应启动 `/usr/local/bin/civ6-lan-server`，而不是早期 Python prototype。Windows WFP 和 macOS Network Extension 的 Civ6 注入适配器尚未完成，因此当前仍不能宣称已经交付可直接进行 Civ6 联机的 `.exe`/`.dmg`。
+Rust 数据面已提供绑定 `CIV6_RELAY_BIND` 的真实 UDP envelope relay。v2 envelope 在不改变 Civ VI payload 的前提下增加 `sequence`、`connection_epoch`、`sent_at_ms` 和可选 `path_id`；旧 v1 包仍可被当前服务端解码。服务端拒绝旧 epoch 和已接受的重复序列，不重放 gameplay 包；发现请求可以在 5 秒窗口内使用相同 `request_id` 重试。默认安全 payload 上限为约 1200 字节，超限会明确丢弃并计数。它不直接转发公网任意 UDP，而是只接受 WireGuard 虚拟地址对应的已登记 peer，并将 `request_id`、`host_session_id`、`gameplay_session_id` 和虚拟源地址带到客户端适配器。共享 client core 已通过真实 UDP socket probe 测试；systemd 应启动 `/usr/local/bin/civ6-lan-server`，而不是早期 Python prototype。Windows WFP 和 macOS Network Extension 的 Civ6 注入适配器尚未完成，因此当前仍不能宣称已经交付可直接进行 Civ6 联机的 `.exe`/`.dmg`。
 
 服务端可重复的 macOS transport-level runner 是 `scripts/mac-e2e-server-test.sh`，它启动正常 Rust 服务、生成临时 Bearer manifest、执行认证 UDP/房间 fan-out/隔离/TTL/错误路径测试，并生成脱敏的 `server-test-report.json`。没有真实第二个 Civ VI 客户端时，报告状态只能是 `partial`，`civ6_discovery` 必须保持 `not_tested`。
 

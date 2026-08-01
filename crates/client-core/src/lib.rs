@@ -4,11 +4,20 @@
 //! owns the control-plane calls, relay envelope transport, and diagnostics so
 //! both clients exercise exactly the same server protocol.
 
-use std::{io, net::SocketAddr, time::Duration};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    io,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use civ6_lan_protocol::{
-    relay::{RelayCodecError, RelayMessage},
+    relay::{
+        RelayCodecError, RelayEnvelope, RelayEnvelopeMeta, RelayMessage,
+        DEFAULT_SAFE_RELAY_PAYLOAD_SIZE, MAX_RELAY_DATAGRAM_SIZE,
+    },
     DiscoveryRequestId, GameplaySessionId, HostSessionId, PeerId, RoomCode, RoomId, VirtualIp,
 };
 use reqwest::{Client, StatusCode};
@@ -67,6 +76,8 @@ pub enum ClientError {
     RelayIo(#[from] std::io::Error),
     #[error("relay response timed out")]
     RelayTimeout,
+    #[error("relay payload of {size} bytes exceeds the safe limit of {limit} bytes")]
+    RelayPayloadTooLarge { size: usize, limit: usize },
     #[error("server returned an unexpected response: {0}")]
     InvalidResponse(String),
 }
@@ -115,6 +126,19 @@ impl ControlClient {
                 peer_id,
                 wireguard_public_key,
             },
+        )
+        .await
+    }
+
+    pub async fn resume_room(
+        &self,
+        room_code: &RoomCode,
+        peer_id: PeerId,
+    ) -> Result<PeerResponse, ClientError> {
+        self.request(
+            reqwest::Method::POST,
+            &format!("/v1/rooms/{room_code}/resume"),
+            &ResumeRoomRequest { peer_id },
         )
         .await
     }
@@ -319,9 +343,36 @@ impl<T: DatagramTransport> RelayClient<T> {
     }
 
     pub async fn receive(&self) -> Result<RelayMessage, ClientError> {
-        let mut buffer = vec![0u8; civ6_lan_protocol::relay::MAX_RELAY_DATAGRAM_SIZE];
+        Ok(self.receive_envelope().await?.message)
+    }
+
+    pub async fn receive_envelope(&self) -> Result<RelayEnvelope, ClientError> {
+        let mut buffer = vec![0u8; MAX_RELAY_DATAGRAM_SIZE];
         let length = self.transport.receive(&mut buffer).await?;
-        Ok(RelayMessage::decode(&buffer[..length])?)
+        Ok(RelayEnvelope::decode(&buffer[..length])?)
+    }
+
+    pub async fn send_envelope(
+        &self,
+        message: &RelayMessage,
+        meta: RelayEnvelopeMeta,
+    ) -> Result<(), ClientError> {
+        self.transport
+            .send(&RelayEnvelope::new(meta, message.clone()).encode()?)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn exchange_envelope(
+        &self,
+        message: &RelayMessage,
+        meta: RelayEnvelopeMeta,
+        timeout: Duration,
+    ) -> Result<RelayEnvelope, ClientError> {
+        self.send_envelope(message, meta).await?;
+        tokio::time::timeout(timeout, self.receive_envelope())
+            .await
+            .map_err(|_| ClientError::RelayTimeout)?
     }
 
     pub async fn exchange(
@@ -337,19 +388,324 @@ impl<T: DatagramTransport> RelayClient<T> {
 
     pub async fn probe(&self, timeout: Duration) -> Result<(), ClientError> {
         let request_id = DiscoveryRequestId::new();
-        let response = self
-            .exchange(&RelayMessage::RelayProbe { request_id }, timeout)
-            .await?;
-        match response {
-            RelayMessage::RelayProbeAck { request_id: actual } if actual == request_id => Ok(()),
-            other => Err(ClientError::InvalidResponse(format!(
-                "expected relay probe ACK, received {other:?}"
-            ))),
+        self.send(&RelayMessage::RelayProbe { request_id }).await?;
+        let started = Instant::now();
+        loop {
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .ok_or(ClientError::RelayTimeout)?;
+            match tokio::time::timeout(remaining, self.receive()).await {
+                Ok(Ok(RelayMessage::RelayProbeAck { request_id: actual }))
+                    if actual == request_id =>
+                {
+                    return Ok(())
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err(ClientError::RelayTimeout),
+            }
         }
     }
 
     pub async fn local_addr(&self) -> Result<SocketAddr, ClientError> {
         Ok(self.transport.local_addr()?)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelayConnectionState {
+    Disconnected,
+    Connecting,
+    Authenticated,
+    RoomJoined,
+    Healthy,
+    Degraded,
+    Reconnecting,
+    Resynced,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RelaySessionConfig {
+    pub probe_interval: Duration,
+    pub probe_timeout: Duration,
+    pub degraded_after_failures: u32,
+    pub reconnect_initial_backoff: Duration,
+    pub reconnect_max_backoff: Duration,
+    pub discovery_retry_interval: Duration,
+    pub discovery_retry_window: Duration,
+    pub safe_payload_size: usize,
+    pub path_id: Option<u8>,
+}
+
+impl Default for RelaySessionConfig {
+    fn default() -> Self {
+        Self {
+            probe_interval: Duration::from_secs(2),
+            probe_timeout: Duration::from_millis(750),
+            degraded_after_failures: 3,
+            reconnect_initial_backoff: Duration::from_millis(250),
+            reconnect_max_backoff: Duration::from_secs(8),
+            discovery_retry_interval: Duration::from_millis(250),
+            discovery_retry_window: Duration::from_secs(5),
+            safe_payload_size: DEFAULT_SAFE_RELAY_PAYLOAD_SIZE,
+            path_id: Some(1), // WireGuard UDP; QUIC DATAGRAM is reserved for a later path.
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RelaySessionSnapshot {
+    pub state: RelayConnectionState,
+    pub consecutive_probe_failures: u32,
+    pub reconnect_attempts: u32,
+    pub connection_epoch: u64,
+    pub last_rtt_ms: Option<u64>,
+    pub rtt_p50_ms: Option<u64>,
+    pub rtt_p95_ms: Option<u64>,
+}
+
+impl RelaySessionSnapshot {
+    fn new(connection_epoch: u64) -> Self {
+        Self {
+            state: RelayConnectionState::Disconnected,
+            consecutive_probe_failures: 0,
+            reconnect_attempts: 0,
+            connection_epoch,
+            last_rtt_ms: None,
+            rtt_p50_ms: None,
+            rtt_p95_ms: None,
+        }
+    }
+}
+
+/// A small, transport-agnostic session controller shared by Windows and
+/// macOS. It owns retry timing and envelope sequencing, while the caller's
+/// reconnect callback performs the authenticated control-plane resume.
+pub struct RelaySession<T> {
+    client: RelayClient<T>,
+    config: RelaySessionConfig,
+    snapshot: RelaySessionSnapshot,
+    next_sequence: u64,
+    rtt_samples_ms: VecDeque<u64>,
+}
+
+impl<T: DatagramTransport> RelaySession<T> {
+    pub fn new(client: RelayClient<T>, connection_epoch: u64) -> Self {
+        Self::with_config(client, connection_epoch, RelaySessionConfig::default())
+    }
+
+    pub fn with_config(
+        client: RelayClient<T>,
+        connection_epoch: u64,
+        config: RelaySessionConfig,
+    ) -> Self {
+        Self {
+            client,
+            config,
+            snapshot: RelaySessionSnapshot::new(connection_epoch),
+            next_sequence: 0,
+            rtt_samples_ms: VecDeque::with_capacity(128),
+        }
+    }
+
+    pub fn client(&self) -> &RelayClient<T> {
+        &self.client
+    }
+
+    pub fn snapshot(&self) -> RelaySessionSnapshot {
+        self.snapshot.clone()
+    }
+
+    pub fn mark_authenticated(&mut self, connection_epoch: u64) {
+        self.snapshot.connection_epoch = connection_epoch;
+        self.snapshot.state = RelayConnectionState::Authenticated;
+    }
+
+    pub fn mark_room_joined(&mut self) {
+        self.snapshot.state = RelayConnectionState::RoomJoined;
+    }
+
+    pub fn mark_disconnected(&mut self) {
+        self.snapshot.state = RelayConnectionState::Disconnected;
+    }
+
+    pub fn next_envelope_meta(&mut self) -> RelayEnvelopeMeta {
+        self.next_sequence = self.next_sequence.saturating_add(1).max(1);
+        RelayEnvelopeMeta::new(
+            self.next_sequence,
+            self.snapshot.connection_epoch,
+            self.config.path_id,
+        )
+    }
+
+    pub async fn probe_once(&mut self) -> Result<Duration, ClientError> {
+        if self.snapshot.state == RelayConnectionState::Disconnected {
+            self.snapshot.state = RelayConnectionState::Connecting;
+        }
+        let request_id = DiscoveryRequestId::new();
+        let meta = self.next_envelope_meta();
+        let started = Instant::now();
+        self.client
+            .send_envelope(&RelayMessage::RelayProbe { request_id }, meta)
+            .await?;
+        loop {
+            let elapsed = started.elapsed();
+            let remaining = self
+                .config
+                .probe_timeout
+                .checked_sub(elapsed)
+                .ok_or(ClientError::RelayTimeout)?;
+            let response = tokio::time::timeout(remaining, self.client.receive_envelope())
+                .await
+                .map_err(|_| ClientError::RelayTimeout)??;
+            if matches!(
+                response.message,
+                RelayMessage::RelayProbeAck { request_id: actual } if actual == request_id
+            ) {
+                let rtt = started.elapsed();
+                self.record_probe_success(rtt);
+                return Ok(rtt);
+            }
+        }
+    }
+
+    /// Keep the relay path healthy until the task is cancelled. The callback
+    /// is invoked only after the failure threshold and should call the control
+    /// API's resume endpoint. Returning the fresh epoch invalidates the old
+    /// gameplay path without replaying any Civ VI packets.
+    pub async fn run_with_reconnect<F, Fut>(&mut self, mut reconnect: F) -> Result<(), ClientError>
+    where
+        F: FnMut(RelaySessionSnapshot) -> Fut,
+        Fut: Future<Output = Result<u64, ClientError>>,
+    {
+        loop {
+            match self.probe_once().await {
+                Ok(_) => {
+                    if matches!(
+                        self.snapshot.state,
+                        RelayConnectionState::Resynced | RelayConnectionState::RoomJoined
+                    ) {
+                        self.snapshot.state = RelayConnectionState::Healthy;
+                    }
+                    tokio::time::sleep(self.config.probe_interval).await;
+                }
+                Err(_error) => {
+                    self.snapshot.consecutive_probe_failures =
+                        self.snapshot.consecutive_probe_failures.saturating_add(1);
+                    if self.snapshot.consecutive_probe_failures
+                        < self.config.degraded_after_failures
+                    {
+                        tokio::time::sleep(self.config.probe_interval).await;
+                        continue;
+                    }
+
+                    self.snapshot.state = RelayConnectionState::Degraded;
+                    loop {
+                        self.snapshot.state = RelayConnectionState::Reconnecting;
+                        let delay = self.reconnect_delay();
+                        tokio::time::sleep(delay).await;
+                        self.snapshot.reconnect_attempts =
+                            self.snapshot.reconnect_attempts.saturating_add(1);
+                        match reconnect(self.snapshot()).await {
+                            Ok(connection_epoch) => {
+                                self.snapshot.connection_epoch = connection_epoch;
+                                self.snapshot.consecutive_probe_failures = 0;
+                                self.snapshot.reconnect_attempts = 0;
+                                self.next_sequence = 0;
+                                self.snapshot.state = RelayConnectionState::Resynced;
+                                break;
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn send_gameplay(&mut self, message: &RelayMessage) -> Result<(), ClientError> {
+        self.ensure_safe_payload(message)?;
+        let meta = self.next_envelope_meta();
+        self.client.send_envelope(message, meta).await
+    }
+
+    /// Discovery is the only application traffic retried by the client. The
+    /// request ID stays stable so the relay can refresh its cached fan-out
+    /// without creating a second logical request.
+    pub async fn send_discovery_with_retry(
+        &mut self,
+        message: &RelayMessage,
+    ) -> Result<u32, ClientError> {
+        let request_id = match message {
+            RelayMessage::DiscoveryRequest { request_id, .. } => *request_id,
+            _ => {
+                return Err(ClientError::InvalidResponse(
+                    "discovery retry requires a DiscoveryRequest".to_owned(),
+                ))
+            }
+        };
+        let deadline = Instant::now() + self.config.discovery_retry_window;
+        let mut sends = 0;
+        let mut last_error = None;
+        while Instant::now() < deadline {
+            self.ensure_safe_payload(message)?;
+            let meta = self.next_envelope_meta();
+            match self.client.send_envelope(message, meta).await {
+                Ok(()) => {
+                    sends += 1;
+                    last_error = None;
+                }
+                Err(error) => last_error = Some(error),
+            }
+            tokio::time::sleep(self.config.discovery_retry_interval).await;
+        }
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+        let _ = request_id;
+        Ok(sends)
+    }
+
+    fn record_probe_success(&mut self, rtt: Duration) {
+        self.snapshot.consecutive_probe_failures = 0;
+        self.snapshot.last_rtt_ms = Some(rtt.as_millis().min(u128::from(u64::MAX)) as u64);
+        let rtt_ms = self.snapshot.last_rtt_ms.unwrap_or_default();
+        if self.rtt_samples_ms.len() >= 128 {
+            self.rtt_samples_ms.pop_front();
+        }
+        self.rtt_samples_ms.push_back(rtt_ms);
+        let mut samples: Vec<_> = self.rtt_samples_ms.iter().copied().collect();
+        samples.sort_unstable();
+        self.snapshot.rtt_p50_ms = samples.get((samples.len() - 1) * 50 / 100).copied();
+        self.snapshot.rtt_p95_ms = samples.get((samples.len() - 1) * 95 / 100).copied();
+    }
+
+    fn reconnect_delay(&self) -> Duration {
+        let attempt = self.snapshot.reconnect_attempts.min(5);
+        let multiplier = 1_u32 << attempt;
+        self.config
+            .reconnect_initial_backoff
+            .saturating_mul(multiplier)
+            .min(self.config.reconnect_max_backoff)
+    }
+
+    fn ensure_safe_payload(&self, message: &RelayMessage) -> Result<(), ClientError> {
+        let payload_size = match message {
+            RelayMessage::DiscoveryRequest { payload, .. }
+            | RelayMessage::DiscoveryToHost { payload, .. }
+            | RelayMessage::DiscoveryResponse { payload, .. }
+            | RelayMessage::DiscoveryToClient { payload, .. }
+            | RelayMessage::GameplayPacket { payload, .. }
+            | RelayMessage::GameplayToPeer { payload, .. } => payload.len(),
+            RelayMessage::RelayProbe { .. } | RelayMessage::RelayProbeAck { .. } => 0,
+        };
+        if payload_size > self.config.safe_payload_size {
+            return Err(ClientError::RelayPayloadTooLarge {
+                size: payload_size,
+                limit: self.config.safe_payload_size,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -372,6 +728,7 @@ pub struct PeerResponse {
     pub room_id: RoomId,
     pub peer_id: PeerId,
     pub virtual_ip: VirtualIp,
+    pub connection_epoch: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -400,11 +757,19 @@ pub struct RelayMetricsResponse {
     pub dropped_packets: u64,
     pub duplicated_packets: u64,
     pub reordered_packets: u64,
+    pub sequence_duplicates: u64,
+    pub rate_limited_packets: u64,
+    pub oversized_packets: u64,
+    pub probe_successes: u64,
+    pub probe_failures: u64,
+    pub last_probe_at_ms: u64,
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub active_peers: usize,
+    pub suspended_peers: usize,
     pub active_rooms: usize,
     pub active_hosts: usize,
+    pub active_gameplay_sessions: usize,
     pub authentication_failures: u64,
 }
 
@@ -422,6 +787,11 @@ struct CreateRoomRequest {
 struct JoinRoomRequest {
     peer_id: Option<PeerId>,
     wireguard_public_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResumeRoomRequest {
+    peer_id: PeerId,
 }
 
 #[derive(Debug, Serialize)]
@@ -471,6 +841,71 @@ mod tests {
         server_task.await.unwrap();
         assert_eq!(actual, expected);
         assert_eq!(client.local_addr().await.unwrap().ip(), Ipv4Addr::LOCALHOST);
+    }
+
+    #[tokio::test]
+    async fn relay_session_sequences_probes_and_records_rtt() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = RelayClient::bind("127.0.0.1:0".parse().unwrap(), server_addr)
+            .await
+            .unwrap();
+        let mut session = RelaySession::new(client, 7);
+        session.mark_authenticated(7);
+        session.mark_room_joined();
+        let server_task = tokio::spawn(async move {
+            let mut buffer = [0u8; MAX_RELAY_DATAGRAM_SIZE];
+            let (length, source) = server.recv_from(&mut buffer).await.unwrap();
+            let envelope = RelayEnvelope::decode(&buffer[..length]).unwrap();
+            assert_eq!(envelope.meta.sequence, 1);
+            assert_eq!(envelope.meta.connection_epoch, 7);
+            let ack = RelayEnvelope::new(
+                envelope.meta,
+                RelayMessage::RelayProbeAck {
+                    request_id: match envelope.message {
+                        RelayMessage::RelayProbe { request_id } => request_id,
+                        other => panic!("unexpected probe: {other:?}"),
+                    },
+                },
+            )
+            .encode()
+            .unwrap();
+            server.send_to(&ack, source).await.unwrap();
+        });
+        session.probe_once().await.unwrap();
+        server_task.await.unwrap();
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.state, RelayConnectionState::RoomJoined);
+        assert!(snapshot.last_rtt_ms.is_some());
+        assert_eq!(session.next_envelope_meta().sequence, 2);
+    }
+
+    #[test]
+    fn relay_session_backoff_matches_the_reconnect_contract() {
+        let client = RelayClient::from_transport(TestTransport);
+        let mut session = RelaySession::new(client, 1);
+        assert_eq!(session.reconnect_delay(), Duration::from_millis(250));
+        session.snapshot.reconnect_attempts = 4;
+        assert_eq!(session.reconnect_delay(), Duration::from_secs(4));
+        session.snapshot.reconnect_attempts = 8;
+        assert_eq!(session.reconnect_delay(), Duration::from_secs(8));
+    }
+
+    struct TestTransport;
+
+    #[async_trait]
+    impl DatagramTransport for TestTransport {
+        async fn send(&self, _packet: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn receive(&self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "test transport"))
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok("127.0.0.1:0".parse().unwrap())
+        }
     }
 
     #[test]

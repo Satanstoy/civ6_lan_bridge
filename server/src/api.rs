@@ -26,6 +26,7 @@ struct ErrorResponse {
 #[derive(Debug)]
 pub enum ApiError {
     Unauthorized,
+    RateLimited,
     Forbidden(String),
     BadRequest(String),
     NotFound(String),
@@ -37,6 +38,7 @@ impl ApiError {
     fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             Self::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
@@ -51,6 +53,7 @@ impl IntoResponse for ApiError {
         let (status, error) = self.status_and_code();
         let message = match &self {
             Self::Unauthorized => "a valid bearer token is required".to_owned(),
+            Self::RateLimited => "control request rate limit exceeded".to_owned(),
             Self::Forbidden(message)
             | Self::BadRequest(message)
             | Self::NotFound(message)
@@ -74,7 +77,15 @@ impl From<RouterError> for ApiError {
             | RouterError::DuplicateRoomId(_)
             | RouterError::RoomNotEmpty(_)
             | RouterError::PeerAlreadyInRoom(_)
-            | RouterError::VirtualIpInUse(_) => Self::Conflict(error.to_string()),
+            | RouterError::VirtualIpInUse(_)
+            | RouterError::RoomLimitReached
+            | RouterError::RoomPeerLimitReached(_)
+            | RouterError::PeerLimitReached
+            | RouterError::HostLimitReached(_)
+            | RouterError::PeerDisconnected(_)
+            | RouterError::PeerGraceExpired(_)
+            | RouterError::GameplayLimitReached
+            | RouterError::DiscoveryRequestConflict(_) => Self::Conflict(error.to_string()),
             RouterError::HostNotInRoom(_, _) | RouterError::UnauthorizedGameplayPeer(_, _) => {
                 Self::Forbidden(error.to_string())
             }
@@ -105,7 +116,7 @@ pub struct CreateRoomRequest {
     pub room_code: Option<RoomCode>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct JoinRoomRequest {
     pub peer_id: Option<PeerId>,
     pub wireguard_public_key: Option<String>,
@@ -141,6 +152,7 @@ pub struct PeerResponse {
     pub room_id: RoomId,
     pub peer_id: PeerId,
     pub virtual_ip: VirtualIp,
+    pub connection_epoch: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -175,6 +187,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/test/metrics", get(test_metrics))
         .route("/v1/rooms", post(create_room))
         .route("/v1/rooms/{code}/join", post(join_room))
+        .route("/v1/rooms/{code}/resume", post(resume_room))
         .route("/v1/rooms/{code}/status", get(room_status))
         .route("/v1/rooms/{code}/hosts", post(register_host))
         .route("/v1/rooms/{code}/heartbeat", post(heartbeat_host))
@@ -271,7 +284,7 @@ async fn join_room(
         crate::wireguard::WireGuardManager::validate_public_key(public_key)?;
     }
 
-    let (room_id, virtual_ip) = {
+    let (room_id, virtual_ip, connection_epoch) = {
         let mut router = state.router.write().await;
         let room_id = router
             .room_id_for_code(&room_code)
@@ -279,7 +292,8 @@ async fn join_room(
         let virtual_ip = allocate_virtual_ip(&router, state.virtual_ip_prefix)
             .ok_or_else(|| ApiError::Conflict("virtual IP pool is exhausted".to_owned()))?;
         router.join_room(room_id, peer_id, virtual_ip)?;
-        (room_id, virtual_ip)
+        let connection_epoch = router.peer_connection_epoch(peer_id)?;
+        (room_id, virtual_ip, connection_epoch)
     };
 
     if let Some(manager) = wireguard.as_ref() {
@@ -321,8 +335,34 @@ async fn join_room(
             room_id,
             peer_id,
             virtual_ip,
+            connection_epoch,
         }),
     ))
+}
+
+async fn resume_room(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<JoinRoomRequest>,
+) -> Result<Json<PeerResponse>, ApiError> {
+    require_bearer(&headers, &state)?;
+    let room_code = parse_room_code(&code).map_err(ApiError::BadRequest)?;
+    let now = Instant::now();
+    let mut router = state.router.write().await;
+    let room_id = router
+        .room_id_for_code(&room_code)
+        .ok_or_else(|| ApiError::NotFound("room does not exist".to_owned()))?;
+    let peer_id = payload
+        .peer_id
+        .ok_or_else(|| ApiError::BadRequest("peer_id is required to resume a room".to_owned()))?;
+    let snapshot = router.resume_peer(room_id, peer_id, now)?;
+    Ok(Json(PeerResponse {
+        room_id: snapshot.room_id,
+        peer_id: snapshot.peer_id,
+        virtual_ip: snapshot.virtual_ip,
+        connection_epoch: snapshot.connection_epoch,
+    }))
 }
 
 async fn room_status(
@@ -577,7 +617,14 @@ fn require_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError>
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
     if provided == Some(expected.as_str()) {
-        Ok(())
+        if state
+            .api_rate_limiter
+            .allow(provided.unwrap_or_default().to_owned())
+        {
+            Ok(())
+        } else {
+            Err(ApiError::RateLimited)
+        }
     } else {
         state.metrics.record_authentication_failure();
         Err(ApiError::Unauthorized)
@@ -965,6 +1012,53 @@ mod tests {
         assert_eq!(status.room_code, RoomCode::parse("RMAAAA").unwrap());
         assert_eq!(status.member_count, 1);
         assert_eq!(status.host_count, 1);
+    }
+
+    #[tokio::test]
+    async fn resume_endpoint_keeps_peer_identity_and_rotates_epoch() {
+        let state = AppState::new("test-token");
+        let inspector = state.clone();
+        let app = build_router(state);
+        let created = app
+            .clone()
+            .oneshot(authorized_request(
+                "POST",
+                "/v1/rooms",
+                r#"{"room_code":"RMRECY"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let joined = app
+            .clone()
+            .oneshot(authorized_request("POST", "/v1/rooms/RMRECY/join", "{}"))
+            .await
+            .unwrap();
+        let body = joined.into_body().collect().await.unwrap().to_bytes();
+        let peer: PeerResponse = serde_json::from_slice(&body).unwrap();
+        {
+            let mut router = inspector.router.write().await;
+            router.expire(Instant::now() + Duration::from_secs(16));
+        }
+
+        let resumed = app
+            .oneshot(authorized_request(
+                "POST",
+                "/v1/rooms/RMRECY/resume",
+                &serde_json::to_string(&JoinRoomRequest {
+                    peer_id: Some(peer.peer_id),
+                    wireguard_public_key: None,
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let body = resumed.into_body().collect().await.unwrap().to_bytes();
+        let resumed_peer: PeerResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resumed_peer.peer_id, peer.peer_id);
+        assert_eq!(resumed_peer.virtual_ip, peer.virtual_ip);
+        assert_eq!(resumed_peer.connection_epoch, peer.connection_epoch + 1);
     }
 
     #[tokio::test]

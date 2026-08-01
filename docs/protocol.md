@@ -26,7 +26,7 @@ discovery: 62900–62999/UDP
 gameplay:  62056/UDP
 ```
 
-服务端和客户端都必须拒绝其他 UDP 端口进入 Civ6 relay。单个 UDP datagram 的默认上限为 4096 字节；超过上限直接丢弃并计数，不分片、不改用 TCP。
+服务端和客户端都必须拒绝其他 UDP 端口进入 Civ6 relay。协议允许的 Civ VI payload 上限仍为 4096 字节，但默认安全 relay payload 上限约为 1200 字节，以适配 MTU 1280 的 macOS tunnel；超过安全上限直接丢弃并计数，不使用公网 IP 分片，也不改用 TCP 承载 gameplay。
 
 ## 3. 房间状态
 
@@ -49,6 +49,8 @@ leave / timeout / relay restart ── session removed
 - `host_session`：15 秒无心跳过期；
 - `discovery_request`：5 秒过期；
 - `gameplay_session`：30 秒无数据过期；
+- peer 普通心跳租约：15 秒；
+- peer 断线恢复宽限期：45 秒；宽限期内保留 `room_id`、`peer_id` 和虚拟 IP；
 - relay 重启：所有内存 gameplay session 失效，客户端重新注册。
 
 所有值由服务端返回的配置或能力文档决定，客户端不能自行延长。
@@ -94,6 +96,8 @@ host_peer_id   → client_peer_id
 
 - 控制 API 写请求使用客户端生成的 idempotency key；
 - UDP 数据包不重传，保持 Civ6 原有 datagram 语义；
+- discovery 可以在 5 秒窗口内使用相同 `discovery_request_id` 重试；服务端对相同来源/端口去重并刷新短期 fan-out 缓存；
+- gameplay 包不盲目重传；恢复链路时生成新的 `connection_epoch`，旧 epoch 的迟到包全部丢弃；
 - 控制面重试不得创建重复 room、host session 或 gameplay session；
 - `401/403` 表示 token/权限问题，客户端需要重新鉴权；
 - `404` 表示 session 已被清理，客户端需要重新发现；
@@ -125,10 +129,12 @@ host_peer_id   → client_peer_id
 
 ```text
 magic[4] = "C6LB"
-version[1] = 1
+version[1] = 2
 kind[1]
 body_len[2] = big-endian
 ```
+
+v2 envelope 的 body 前置固定元数据：`sequence:u64`、`connection_epoch:u64`、`sent_at_ms:u64`、`path_present:u8`、`path_id:u8`。`path_id=1` 表示 WireGuard UDP；QUIC DATAGRAM 只预留路径编号，不在本阶段宣称已经接入。当前服务端仍接受 v1 legacy envelope 以便测试和渐进迁移。
 
 当前消息方向：
 
@@ -143,6 +149,6 @@ body_len[2] = big-endian
 | `RelayProbe` | client adapter → server | request ID；验证 datagram transport 到 relay 的有效交换 |
 | `RelayProbeAck` | server → client adapter | 对应 request ID；不代表 Civ6 已通过 2K 年龄验证 |
 
-服务端只接受客户端方向的 `DiscoveryRequest`、`DiscoveryResponse`、`GameplayPacket` 和 `RelayProbe`；收到 outbound kind、未知 peer、伪造 host session、错误端口或超过 4096 字节的 payload 时直接丢弃。默认 envelope relay 端口为 `32000/UDP`，而 Civ VI 的 `62900-62999/UDP` 与 `62056/UDP` 只出现在 envelope 字段中。
+服务端只接受客户端方向的 `DiscoveryRequest`、`DiscoveryResponse`、`GameplayPacket` 和 `RelayProbe`；收到 outbound kind、未知 peer、伪造 host session、旧 connection epoch、重复序列、错误端口或超过安全 payload 上限的包时直接丢弃并计数。默认 envelope relay 端口为 `32000/UDP`，而 Civ VI 的 `62900-62999/UDP` 与 `62056/UDP` 只出现在 envelope 字段中。控制 API 和 UDP relay 都有有界速率限制，房间、peer、host 和 gameplay session 也有服务端容量上限。
 
 客户端和服务端必须从共享协议 crate 使用同一套 envelope 编解码。`RelayClient` 只依赖 `DatagramTransport` 抽象，UDP 是默认实现；QUIC DATAGRAM、udp2raw 等候选传输必须保持相同的消息边界和超时语义，不能改变房间路由。

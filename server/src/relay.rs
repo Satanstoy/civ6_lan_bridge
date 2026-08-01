@@ -12,13 +12,16 @@ use std::{
 };
 
 use civ6_lan_protocol::{
-    relay::{RelayCodecError, RelayMessage, MAX_RELAY_DATAGRAM_SIZE},
+    relay::{
+        RelayCodecError, RelayEnvelope, RelayEnvelopeMeta, RelayMessage, MAX_RELAY_DATAGRAM_SIZE,
+    },
     HostSessionId, PeerId, VirtualIp,
 };
 use civ6_lan_router::{RelayAction, RelayIngress, RoomRouter, RouterError};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
+use crate::metrics::SequenceDisposition;
 use crate::state::AppState;
 
 pub const DEFAULT_RELAY_PORT: u16 = 32_000;
@@ -27,6 +30,7 @@ pub const DEFAULT_RELAY_PORT: u16 = 32_000;
 pub struct OutboundDatagram {
     pub destination: SocketAddr,
     pub message: RelayMessage,
+    pub meta: RelayEnvelopeMeta,
 }
 
 #[derive(Debug, Error)]
@@ -39,6 +43,12 @@ pub enum RelayError {
     InvalidSource(SocketAddr),
     #[error("relay source virtual IP {0} is not registered")]
     UnknownSource(Ipv4Addr),
+    #[error("relay packet uses stale connection epoch {received}; current epoch is {current}")]
+    StaleConnectionEpoch { received: u64, current: u64 },
+    #[error("relay packet rate limit exceeded")]
+    RateLimited,
+    #[error("relay packet sequence {0} was already accepted")]
+    DuplicateSequence(u64),
     #[error("host session {host_session_id} is not owned by source peer {source_peer_id}")]
     SourcePeerMismatch {
         host_session_id: HostSessionId,
@@ -66,26 +76,51 @@ impl RelayDispatcher {
         source: SocketAddr,
         packet: &[u8],
     ) -> Result<Vec<OutboundDatagram>, RelayError> {
-        let message = RelayMessage::decode(packet)?;
+        let envelope = RelayEnvelope::decode(packet)?;
         let source_ip = match source.ip() {
             IpAddr::V4(value) => value,
             IpAddr::V6(_) => return Err(RelayError::InvalidSource(source)),
         };
+        if !self.state.udp_rate_limiter.allow(source_ip.to_string()) {
+            self.state.metrics.record_rate_limited();
+            return Err(RelayError::RateLimited);
+        }
 
         let mut router = self.state.router.write().await;
         let source_peer_id = router
             .peer_for_virtual_ip(VirtualIp::new(source_ip))
             .ok_or(RelayError::UnknownSource(source_ip))?;
-        let message = match message {
+        let meta = envelope.meta;
+        let current_epoch = router.peer_connection_epoch(source_peer_id)?;
+        if meta.connection_epoch != 0 && meta.connection_epoch != current_epoch {
+            return Err(RelayError::StaleConnectionEpoch {
+                received: meta.connection_epoch,
+                current: current_epoch,
+            });
+        }
+        let message = match envelope.message {
             RelayMessage::RelayProbe { request_id } => {
+                let now = Instant::now();
+                router.mark_peer_seen(source_peer_id, now)?;
+                self.state.metrics.record_probe(true);
                 return Ok(vec![OutboundDatagram {
                     destination: source,
                     message: RelayMessage::RelayProbeAck { request_id },
+                    meta,
                 }]);
             }
             other => other,
         };
         let now = Instant::now();
+        router.mark_peer_seen(source_peer_id, now)?;
+        if self
+            .state
+            .metrics
+            .record_sequence(source_peer_id, meta.sequence)
+            == SequenceDisposition::Duplicate
+        {
+            return Err(RelayError::DuplicateSequence(meta.sequence));
+        }
         let action = match message {
             RelayMessage::DiscoveryRequest {
                 request_id,
@@ -141,13 +176,14 @@ impl RelayDispatcher {
             }
         };
 
-        self.action_to_datagrams(&router, action)
+        self.action_to_datagrams(&router, action, meta)
     }
 
     fn action_to_datagrams(
         &self,
         router: &RoomRouter,
         action: RelayAction,
+        meta: RelayEnvelopeMeta,
     ) -> Result<Vec<OutboundDatagram>, RelayError> {
         match action {
             RelayAction::DiscoveryFanout {
@@ -170,6 +206,7 @@ impl RelayDispatcher {
                             destination_port,
                             payload: payload.clone(),
                         },
+                        meta,
                     })
                     .collect())
             }
@@ -191,6 +228,7 @@ impl RelayDispatcher {
                         source_port,
                         payload,
                     },
+                    meta,
                 }])
             }
             RelayAction::GameplayUnicast {
@@ -209,6 +247,7 @@ impl RelayDispatcher {
                         destination_port,
                         payload,
                     },
+                    meta,
                 }])
             }
         }
@@ -247,7 +286,7 @@ impl RelayServer {
                         match self.dispatcher.handle_datagram(source, &socket_buffer[..length]).await {
                             Ok(outbound) => {
                                 for datagram in outbound {
-                                    let packet = datagram.message.encode()?;
+                                    let packet = RelayEnvelope::new(datagram.meta, datagram.message).encode()?;
                                     self.socket.send_to(&packet, datagram.destination).await?;
                                     self.dispatcher.state.metrics.record_sent(packet.len());
                                 }
@@ -257,8 +296,16 @@ impl RelayServer {
                                 &error,
                                 RelayError::UnknownSource(_)
                                     | RelayError::SourcePeerMismatch { .. }
+                                    | RelayError::StaleConnectionEpoch { .. }
+                                    | RelayError::Router(RouterError::PeerDisconnected(_))
                                     | RelayError::Router(RouterError::UnauthorizedGameplayPeer(..))
                             );
+                            if matches!(
+                                &error,
+                                RelayError::Router(RouterError::DatagramTooLarge(_))
+                            ) {
+                                self.dispatcher.state.metrics.record_oversized();
+                            }
                             self.dispatcher.state.metrics.record_drop(authentication_failure);
                             tracing::debug!(%source, %error, "dropping invalid relay datagram");
                         }
@@ -645,5 +692,47 @@ mod tests {
             } if id == host_session_id && peer == client_peer_id
         ));
         assert_ne!(client_peer_id, host_peer_id);
+    }
+
+    #[tokio::test]
+    async fn relay_rejects_packets_from_an_old_connection_epoch() {
+        let (state, room_id, client_peer_id, _, _) = setup().await;
+        let dispatcher = RelayDispatcher::new(state.clone(), DEFAULT_RELAY_PORT);
+        let joined = Instant::now();
+        let old_epoch = {
+            let mut router = state.router.write().await;
+            router.mark_peer_seen(client_peer_id, joined).unwrap();
+            let old_epoch = router.peer_connection_epoch(client_peer_id).unwrap();
+            router.expire(joined + Duration::from_secs(16));
+            let resumed = router
+                .resume_peer(room_id, client_peer_id, joined + Duration::from_secs(17))
+                .unwrap();
+            assert_eq!(resumed.connection_epoch, old_epoch + 1);
+            old_epoch
+        };
+        let request = RelayMessage::DiscoveryRequest {
+            request_id: DiscoveryRequestId::new(),
+            destination_port: Civ6UdpPort(62_900),
+            payload: vec![1],
+        };
+        let packet = RelayEnvelope::new(
+            RelayEnvelopeMeta {
+                sequence: 1,
+                connection_epoch: old_epoch,
+                sent_at_ms: 1,
+                path_id: Some(1),
+            },
+            request,
+        )
+        .encode()
+        .unwrap();
+        let error = dispatcher
+            .handle_datagram(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 240, 0, 2)), DEFAULT_RELAY_PORT),
+                &packet,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RelayError::StaleConnectionEpoch { .. }));
     }
 }

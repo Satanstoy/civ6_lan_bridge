@@ -5,6 +5,8 @@ use civ6_lan_protocol::VirtualIp;
 use thiserror::Error;
 use tokio::process::Command;
 
+pub const PERSISTENT_KEEPALIVE_SECONDS: u16 = 25;
+
 #[derive(Clone, Debug)]
 pub struct WireGuardManager {
     interface: String,
@@ -52,6 +54,8 @@ impl WireGuardManager {
             public_key.to_owned(),
             "allowed-ips".to_owned(),
             format!("{virtual_ip}/32"),
+            "persistent-keepalive".to_owned(),
+            PERSISTENT_KEEPALIVE_SECONDS.to_string(),
         ]
     }
 
@@ -118,6 +122,8 @@ mod tests {
         assert_eq!(args[3], key);
         assert_eq!(args[4], "allowed-ips");
         assert_eq!(args[5], "10.240.0.2/32");
+        assert_eq!(args[6], "persistent-keepalive");
+        assert_eq!(args[7], "25");
         assert_eq!(
             virtual_ip_cidr(VirtualIp::new("10.240.0.2".parse().unwrap())),
             "10.240.0.2/32"

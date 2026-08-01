@@ -14,9 +14,13 @@ use crate::{
     MAX_CIV6_DATAGRAM_SIZE,
 };
 
-pub const RELAY_PROTOCOL_VERSION: u8 = 1;
+pub const LEGACY_RELAY_PROTOCOL_VERSION: u8 = 1;
+pub const RELAY_PROTOCOL_VERSION: u8 = 2;
 pub const RELAY_HEADER_SIZE: usize = 8;
 pub const MAX_RELAY_DATAGRAM_SIZE: usize = RELAY_HEADER_SIZE + MAX_CIV6_DATAGRAM_SIZE + 64;
+/// The default payload ceiling that fits through the smallest supported
+/// tunnel without relying on IP fragmentation.
+pub const DEFAULT_SAFE_RELAY_PAYLOAD_SIZE: usize = 1_200;
 
 const MAGIC: [u8; 4] = *b"C6LB";
 const DISCOVERY_REQUEST: u8 = 1;
@@ -72,6 +76,57 @@ pub enum RelayMessage {
     },
 }
 
+/// Metadata carried by the v2 relay envelope.
+///
+/// `sequence` is sender-local and is intentionally not an acknowledgement
+/// number: gameplay datagrams are never replayed by the relay. A non-zero
+/// `connection_epoch` identifies the current authenticated path for a peer;
+/// the server rejects packets from older epochs after a resume.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RelayEnvelopeMeta {
+    pub sequence: u64,
+    pub connection_epoch: u64,
+    /// Milliseconds since the Unix epoch, supplied by the sender for
+    /// diagnostics only. It is not used for expiry decisions.
+    pub sent_at_ms: u64,
+    /// `None` means the default/unknown path. The first concrete path is
+    /// WireGuard UDP; QUIC DATAGRAM can use a later value without changing
+    /// the room or Civ VI payload protocol.
+    pub path_id: Option<u8>,
+}
+
+impl RelayEnvelopeMeta {
+    pub fn new(sequence: u64, connection_epoch: u64, path_id: Option<u8>) -> Self {
+        Self {
+            sequence,
+            connection_epoch,
+            sent_at_ms: unix_time_ms(),
+            path_id,
+        }
+    }
+}
+
+/// A versioned message plus transport/session metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayEnvelope {
+    pub meta: RelayEnvelopeMeta,
+    pub message: RelayMessage,
+}
+
+impl RelayEnvelope {
+    pub fn new(meta: RelayEnvelopeMeta, message: RelayMessage) -> Self {
+        Self { meta, message }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, RelayCodecError> {
+        encode_packet(&self.message, Some(self.meta), RELAY_PROTOCOL_VERSION)
+    }
+
+    pub fn decode(packet: &[u8]) -> Result<Self, RelayCodecError> {
+        decode_packet(packet)
+    }
+}
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum RelayCodecError {
     #[error("malformed relay packet: {0}")]
@@ -82,182 +137,259 @@ pub enum RelayCodecError {
 
 impl RelayMessage {
     pub fn encode(&self) -> Result<Vec<u8>, RelayCodecError> {
-        let mut body = Vec::with_capacity(RELAY_HEADER_SIZE + MAX_CIV6_DATAGRAM_SIZE);
-        let kind = match self {
-            Self::DiscoveryRequest {
-                request_id,
-                destination_port,
-                payload,
-            } => {
-                write_id(&mut body, request_id.as_uuid());
-                write_port(&mut body, *destination_port);
-                write_payload(&mut body, payload)?;
-                DISCOVERY_REQUEST
-            }
-            Self::DiscoveryToHost {
-                request_id,
-                source_virtual_ip,
-                destination_port,
-                payload,
-            } => {
-                write_id(&mut body, request_id.as_uuid());
-                write_ip(&mut body, *source_virtual_ip);
-                write_port(&mut body, *destination_port);
-                write_payload(&mut body, payload)?;
-                DISCOVERY_TO_HOST
-            }
-            Self::DiscoveryResponse {
-                request_id,
-                host_session_id,
-                source_port,
-                payload,
-            } => {
-                write_id(&mut body, request_id.as_uuid());
-                write_id(&mut body, host_session_id.as_uuid());
-                write_port(&mut body, *source_port);
-                write_payload(&mut body, payload)?;
-                DISCOVERY_RESPONSE
-            }
-            Self::DiscoveryToClient {
-                request_id,
-                host_virtual_ip,
-                source_port,
-                payload,
-            } => {
-                write_id(&mut body, request_id.as_uuid());
-                write_ip(&mut body, *host_virtual_ip);
-                write_port(&mut body, *source_port);
-                write_payload(&mut body, payload)?;
-                DISCOVERY_TO_CLIENT
-            }
-            Self::GameplayPacket {
-                session_id,
-                source_port,
-                payload,
-            } => {
-                write_id(&mut body, session_id.as_uuid());
-                write_port(&mut body, *source_port);
-                write_payload(&mut body, payload)?;
-                GAMEPLAY_PACKET
-            }
-            Self::GameplayToPeer {
-                session_id,
-                source_virtual_ip,
-                destination_port,
-                payload,
-            } => {
-                write_id(&mut body, session_id.as_uuid());
-                write_ip(&mut body, *source_virtual_ip);
-                write_port(&mut body, *destination_port);
-                write_payload(&mut body, payload)?;
-                GAMEPLAY_TO_PEER
-            }
-            Self::RelayProbe { request_id } => {
-                write_id(&mut body, request_id.as_uuid());
-                RELAY_PROBE
-            }
-            Self::RelayProbeAck { request_id } => {
-                write_id(&mut body, request_id.as_uuid());
-                RELAY_PROBE_ACK
-            }
-        };
+        encode_packet(self, None, LEGACY_RELAY_PROTOCOL_VERSION)
+    }
 
-        if body.len() > u16::MAX as usize {
-            return Err(RelayCodecError::InvalidPacket(
-                "relay envelope body is too large".to_owned(),
-            ));
-        }
-        let mut packet = Vec::with_capacity(RELAY_HEADER_SIZE + body.len());
-        packet.extend_from_slice(&MAGIC);
-        packet.push(RELAY_PROTOCOL_VERSION);
-        packet.push(kind);
-        packet.extend_from_slice(&(body.len() as u16).to_be_bytes());
-        packet.extend_from_slice(&body);
-        Ok(packet)
+    pub fn encode_with_meta(&self, meta: RelayEnvelopeMeta) -> Result<Vec<u8>, RelayCodecError> {
+        encode_packet(self, Some(meta), RELAY_PROTOCOL_VERSION)
     }
 
     pub fn decode(packet: &[u8]) -> Result<Self, RelayCodecError> {
-        if packet.len() > MAX_RELAY_DATAGRAM_SIZE {
-            return Err(RelayCodecError::InvalidPacket(
-                "relay envelope exceeds the maximum datagram size".to_owned(),
-            ));
-        }
-        if packet.len() < RELAY_HEADER_SIZE {
-            return Err(RelayCodecError::InvalidPacket(
-                "relay envelope header is truncated".to_owned(),
-            ));
-        }
-        if packet[..4] != MAGIC {
-            return Err(RelayCodecError::InvalidPacket(
-                "invalid relay magic".to_owned(),
-            ));
-        }
-        if packet[4] != RELAY_PROTOCOL_VERSION {
-            return Err(RelayCodecError::InvalidPacket(format!(
-                "unsupported relay version {}",
-                packet[4]
-            )));
-        }
-
-        let declared_body_len = u16::from_be_bytes([packet[6], packet[7]]) as usize;
-        if declared_body_len != packet.len() - RELAY_HEADER_SIZE {
-            return Err(RelayCodecError::InvalidPacket(
-                "relay envelope length does not match its header".to_owned(),
-            ));
-        }
-
-        let kind = packet[5];
-        let mut body = &packet[RELAY_HEADER_SIZE..];
-        let message = match kind {
-            DISCOVERY_REQUEST => Self::DiscoveryRequest {
-                request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
-                destination_port: read_port(&mut body)?,
-                payload: read_payload(&mut body)?,
-            },
-            DISCOVERY_TO_HOST => Self::DiscoveryToHost {
-                request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
-                source_virtual_ip: read_ip(&mut body)?,
-                destination_port: read_port(&mut body)?,
-                payload: read_payload(&mut body)?,
-            },
-            DISCOVERY_RESPONSE => Self::DiscoveryResponse {
-                request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
-                host_session_id: HostSessionId::from_uuid(read_id(&mut body)?),
-                source_port: read_port(&mut body)?,
-                payload: read_payload(&mut body)?,
-            },
-            DISCOVERY_TO_CLIENT => Self::DiscoveryToClient {
-                request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
-                host_virtual_ip: read_ip(&mut body)?,
-                source_port: read_port(&mut body)?,
-                payload: read_payload(&mut body)?,
-            },
-            GAMEPLAY_PACKET => Self::GameplayPacket {
-                session_id: GameplaySessionId::from_uuid(read_id(&mut body)?),
-                source_port: read_port(&mut body)?,
-                payload: read_payload(&mut body)?,
-            },
-            GAMEPLAY_TO_PEER => Self::GameplayToPeer {
-                session_id: GameplaySessionId::from_uuid(read_id(&mut body)?),
-                source_virtual_ip: read_ip(&mut body)?,
-                destination_port: read_port(&mut body)?,
-                payload: read_payload(&mut body)?,
-            },
-            RELAY_PROBE => Self::RelayProbe {
-                request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
-            },
-            RELAY_PROBE_ACK => Self::RelayProbeAck {
-                request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
-            },
-            other => return Err(RelayCodecError::UnexpectedMessageKind(other)),
-        };
-        if !body.is_empty() {
-            return Err(RelayCodecError::InvalidPacket(
-                "relay envelope contains trailing bytes".to_owned(),
-            ));
-        }
-        Ok(message)
+        Ok(RelayEnvelope::decode(packet)?.message)
     }
+}
+
+fn encode_packet(
+    message: &RelayMessage,
+    meta: Option<RelayEnvelopeMeta>,
+    version: u8,
+) -> Result<Vec<u8>, RelayCodecError> {
+    let mut body = Vec::with_capacity(RELAY_HEADER_SIZE + MAX_CIV6_DATAGRAM_SIZE);
+    if let Some(meta) = meta {
+        write_meta(&mut body, meta);
+    }
+    let kind = match message {
+        RelayMessage::DiscoveryRequest {
+            request_id,
+            destination_port,
+            payload,
+        } => {
+            write_id(&mut body, request_id.as_uuid());
+            write_port(&mut body, *destination_port);
+            write_payload(&mut body, payload)?;
+            DISCOVERY_REQUEST
+        }
+        RelayMessage::DiscoveryToHost {
+            request_id,
+            source_virtual_ip,
+            destination_port,
+            payload,
+        } => {
+            write_id(&mut body, request_id.as_uuid());
+            write_ip(&mut body, *source_virtual_ip);
+            write_port(&mut body, *destination_port);
+            write_payload(&mut body, payload)?;
+            DISCOVERY_TO_HOST
+        }
+        RelayMessage::DiscoveryResponse {
+            request_id,
+            host_session_id,
+            source_port,
+            payload,
+        } => {
+            write_id(&mut body, request_id.as_uuid());
+            write_id(&mut body, host_session_id.as_uuid());
+            write_port(&mut body, *source_port);
+            write_payload(&mut body, payload)?;
+            DISCOVERY_RESPONSE
+        }
+        RelayMessage::DiscoveryToClient {
+            request_id,
+            host_virtual_ip,
+            source_port,
+            payload,
+        } => {
+            write_id(&mut body, request_id.as_uuid());
+            write_ip(&mut body, *host_virtual_ip);
+            write_port(&mut body, *source_port);
+            write_payload(&mut body, payload)?;
+            DISCOVERY_TO_CLIENT
+        }
+        RelayMessage::GameplayPacket {
+            session_id,
+            source_port,
+            payload,
+        } => {
+            write_id(&mut body, session_id.as_uuid());
+            write_port(&mut body, *source_port);
+            write_payload(&mut body, payload)?;
+            GAMEPLAY_PACKET
+        }
+        RelayMessage::GameplayToPeer {
+            session_id,
+            source_virtual_ip,
+            destination_port,
+            payload,
+        } => {
+            write_id(&mut body, session_id.as_uuid());
+            write_ip(&mut body, *source_virtual_ip);
+            write_port(&mut body, *destination_port);
+            write_payload(&mut body, payload)?;
+            GAMEPLAY_TO_PEER
+        }
+        RelayMessage::RelayProbe { request_id } => {
+            write_id(&mut body, request_id.as_uuid());
+            RELAY_PROBE
+        }
+        RelayMessage::RelayProbeAck { request_id } => {
+            write_id(&mut body, request_id.as_uuid());
+            RELAY_PROBE_ACK
+        }
+    };
+
+    if body.len() > u16::MAX as usize {
+        return Err(RelayCodecError::InvalidPacket(
+            "relay envelope body is too large".to_owned(),
+        ));
+    }
+    let mut packet = Vec::with_capacity(RELAY_HEADER_SIZE + body.len());
+    packet.extend_from_slice(&MAGIC);
+    packet.push(version);
+    packet.push(kind);
+    packet.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    packet.extend_from_slice(&body);
+    Ok(packet)
+}
+
+fn decode_packet(packet: &[u8]) -> Result<RelayEnvelope, RelayCodecError> {
+    if packet.len() > MAX_RELAY_DATAGRAM_SIZE {
+        return Err(RelayCodecError::InvalidPacket(
+            "relay envelope exceeds the maximum datagram size".to_owned(),
+        ));
+    }
+    if packet.len() < RELAY_HEADER_SIZE {
+        return Err(RelayCodecError::InvalidPacket(
+            "relay envelope header is truncated".to_owned(),
+        ));
+    }
+    if packet[..4] != MAGIC {
+        return Err(RelayCodecError::InvalidPacket(
+            "invalid relay magic".to_owned(),
+        ));
+    }
+    if packet[4] != LEGACY_RELAY_PROTOCOL_VERSION && packet[4] != RELAY_PROTOCOL_VERSION {
+        return Err(RelayCodecError::InvalidPacket(format!(
+            "unsupported relay version {}",
+            packet[4]
+        )));
+    }
+
+    let declared_body_len = u16::from_be_bytes([packet[6], packet[7]]) as usize;
+    if declared_body_len != packet.len() - RELAY_HEADER_SIZE {
+        return Err(RelayCodecError::InvalidPacket(
+            "relay envelope length does not match its header".to_owned(),
+        ));
+    }
+
+    let kind = packet[5];
+    let mut body = &packet[RELAY_HEADER_SIZE..];
+    let meta = if packet[4] == RELAY_PROTOCOL_VERSION {
+        read_meta(&mut body)?
+    } else {
+        RelayEnvelopeMeta::default()
+    };
+    let message = match kind {
+        DISCOVERY_REQUEST => RelayMessage::DiscoveryRequest {
+            request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
+            destination_port: read_port(&mut body)?,
+            payload: read_payload(&mut body)?,
+        },
+        DISCOVERY_TO_HOST => RelayMessage::DiscoveryToHost {
+            request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
+            source_virtual_ip: read_ip(&mut body)?,
+            destination_port: read_port(&mut body)?,
+            payload: read_payload(&mut body)?,
+        },
+        DISCOVERY_RESPONSE => RelayMessage::DiscoveryResponse {
+            request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
+            host_session_id: HostSessionId::from_uuid(read_id(&mut body)?),
+            source_port: read_port(&mut body)?,
+            payload: read_payload(&mut body)?,
+        },
+        DISCOVERY_TO_CLIENT => RelayMessage::DiscoveryToClient {
+            request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
+            host_virtual_ip: read_ip(&mut body)?,
+            source_port: read_port(&mut body)?,
+            payload: read_payload(&mut body)?,
+        },
+        GAMEPLAY_PACKET => RelayMessage::GameplayPacket {
+            session_id: GameplaySessionId::from_uuid(read_id(&mut body)?),
+            source_port: read_port(&mut body)?,
+            payload: read_payload(&mut body)?,
+        },
+        GAMEPLAY_TO_PEER => RelayMessage::GameplayToPeer {
+            session_id: GameplaySessionId::from_uuid(read_id(&mut body)?),
+            source_virtual_ip: read_ip(&mut body)?,
+            destination_port: read_port(&mut body)?,
+            payload: read_payload(&mut body)?,
+        },
+        RELAY_PROBE => RelayMessage::RelayProbe {
+            request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
+        },
+        RELAY_PROBE_ACK => RelayMessage::RelayProbeAck {
+            request_id: DiscoveryRequestId::from_uuid(read_id(&mut body)?),
+        },
+        other => return Err(RelayCodecError::UnexpectedMessageKind(other)),
+    };
+    if !body.is_empty() {
+        return Err(RelayCodecError::InvalidPacket(
+            "relay envelope contains trailing bytes".to_owned(),
+        ));
+    }
+    Ok(RelayEnvelope { meta, message })
+}
+
+fn write_meta(buffer: &mut Vec<u8>, meta: RelayEnvelopeMeta) {
+    buffer.extend_from_slice(&meta.sequence.to_be_bytes());
+    buffer.extend_from_slice(&meta.connection_epoch.to_be_bytes());
+    buffer.extend_from_slice(&meta.sent_at_ms.to_be_bytes());
+    match meta.path_id {
+        Some(path_id) => {
+            buffer.push(1);
+            buffer.push(path_id);
+        }
+        None => buffer.extend_from_slice(&[0, 0]),
+    }
+}
+
+fn read_meta(input: &mut &[u8]) -> Result<RelayEnvelopeMeta, RelayCodecError> {
+    let sequence =
+        u64::from_be_bytes(read_exact(input, 8)?.try_into().map_err(|_| {
+            RelayCodecError::InvalidPacket("relay sequence is truncated".to_owned())
+        })?);
+    let connection_epoch = u64::from_be_bytes(read_exact(input, 8)?.try_into().map_err(|_| {
+        RelayCodecError::InvalidPacket("relay connection epoch is truncated".to_owned())
+    })?);
+    let sent_at_ms =
+        u64::from_be_bytes(read_exact(input, 8)?.try_into().map_err(|_| {
+            RelayCodecError::InvalidPacket("relay timestamp is truncated".to_owned())
+        })?);
+    let has_path = read_exact(input, 1)?[0];
+    let path_id = read_exact(input, 1)?[0];
+    match has_path {
+        0 => Ok(RelayEnvelopeMeta {
+            sequence,
+            connection_epoch,
+            sent_at_ms,
+            path_id: None,
+        }),
+        1 => Ok(RelayEnvelopeMeta {
+            sequence,
+            connection_epoch,
+            sent_at_ms,
+            path_id: Some(path_id),
+        }),
+        other => Err(RelayCodecError::InvalidPacket(format!(
+            "invalid relay path marker {other}"
+        ))),
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 fn write_id(buffer: &mut Vec<u8>, value: Uuid) {
@@ -342,5 +474,32 @@ mod tests {
             RelayMessage::decode(&invalid),
             Err(RelayCodecError::InvalidPacket(_))
         ));
+    }
+
+    #[test]
+    fn v2_envelope_round_trips_metadata_and_legacy_decode_still_works() {
+        let message = RelayMessage::GameplayPacket {
+            session_id: GameplaySessionId::new(),
+            source_port: Civ6UdpPort(62_056),
+            payload: vec![0xc6, 0x6c, 0x62],
+        };
+        let meta = RelayEnvelopeMeta {
+            sequence: 42,
+            connection_epoch: 7,
+            sent_at_ms: 1_234,
+            path_id: Some(1),
+        };
+        let packet = RelayEnvelope::new(meta, message.clone()).encode().unwrap();
+        assert_eq!(
+            RelayEnvelope::decode(&packet).unwrap(),
+            RelayEnvelope::new(meta, message.clone())
+        );
+        assert_eq!(RelayMessage::decode(&packet).unwrap(), message);
+
+        let legacy = message.encode().unwrap();
+        assert_eq!(
+            RelayEnvelope::decode(&legacy).unwrap(),
+            RelayEnvelope::new(RelayEnvelopeMeta::default(), message)
+        );
     }
 }
