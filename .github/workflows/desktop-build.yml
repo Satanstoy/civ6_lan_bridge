@@ -121,7 +121,7 @@ jobs:
           set -o pipefail
           xcodebuild -verbose \
             -project mac-client/PacketTunnel/PacketTunnel.xcodeproj \
-            -target PacketTunnel \
+            -scheme PacketTunnel \
             -configuration Release \
             -destination generic/platform=macOS \
             -derivedDataPath "mac-client/PacketTunnel/.build/${{ matrix.arch }}" \
