@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		A00000000000000000000001 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000001 /* PacketTunnelProvider.swift */; };
 		A00000000000000000000002 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000005 /* NetworkExtension.framework */; };
+		A00000000000000000000003 /* IPv4UDP.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000006 /* IPv4UDP.swift */; };
+		A00000000000000000000004 /* RelayEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000007 /* RelayEnvelope.swift */; };
+		A00000000000000000000005 /* Civ6PacketRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000008 /* Civ6PacketRouter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -17,6 +20,9 @@
 		B00000000000000000000003 /* PacketTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PacketTunnel.entitlements; sourceTree = "<group>"; };
 		B00000000000000000000004 /* PacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000005 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		B00000000000000000000006 /* IPv4UDP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPv4UDP.swift; sourceTree = "<group>"; };
+		B00000000000000000000007 /* RelayEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayEnvelope.swift; sourceTree = "<group>"; };
+		B00000000000000000000008 /* Civ6PacketRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Civ6PacketRouter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -46,6 +52,9 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000001 /* PacketTunnelProvider.swift */,
+				B00000000000000000000006 /* IPv4UDP.swift */,
+				B00000000000000000000007 /* RelayEnvelope.swift */,
+				B00000000000000000000008 /* Civ6PacketRouter.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -128,6 +137,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000001 /* PacketTunnelProvider.swift in Sources */,
+				A00000000000000000000003 /* IPv4UDP.swift in Sources */,
+				A00000000000000000000004 /* RelayEnvelope.swift in Sources */,
+				A00000000000000000000005 /* Civ6PacketRouter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

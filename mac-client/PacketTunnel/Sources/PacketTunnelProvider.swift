@@ -58,11 +58,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         packetFlow.readPackets { [weak self] packets, protocols in
             guard let self, !self.stopping else { return }
 
-            // TODO(phase-3): parse IPv4/UDP, keep only Civ6 discovery and
-            // gameplay ports, then hand the payload to the shared Rust
-            // DatagramTransport sidecar. Non-Civ6 packets must never be
-            // forwarded by this provider.
-            _ = packets
+            // Keep the packet boundary and port filter in this provider. The
+            // next step hands the selected datagrams to the Rust transport
+            // sidecar; non-Civ6 packets must never reach that sidecar.
+            for packet in packets {
+                guard let datagram = IPv4UDPDatagram.parse(packet) else { continue }
+                guard datagram.isDiscovery || datagram.isGameplay else { continue }
+                // TODO(phase-3): encode the datagram with RelayEnvelope and
+                // send it through the authenticated WireGuard transport.
+            }
             _ = protocols
             self.readPackets()
         }

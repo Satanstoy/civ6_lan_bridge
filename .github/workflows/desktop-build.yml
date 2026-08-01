@@ -100,7 +100,16 @@ jobs:
             -sdk "$SDK" \
             -target "${{ matrix.arch }}-apple-macos12.0" \
             -framework NetworkExtension \
-            mac-client/PacketTunnel/Sources/PacketTunnelProvider.swift
+            mac-client/PacketTunnel/Sources/*.swift
+      - name: Run Swift packet and relay protocol smoke test
+        run: |
+          swiftc \
+            mac-client/PacketTunnel/Sources/IPv4UDP.swift \
+            mac-client/PacketTunnel/Sources/RelayEnvelope.swift \
+            mac-client/PacketTunnel/Sources/Civ6PacketRouter.swift \
+            mac-client/PacketTunnel/Tests/ProtocolSmoke.swift \
+            -o "$RUNNER_TEMP/civ6-lan-bridge-protocol-smoke"
+          "$RUNNER_TEMP/civ6-lan-bridge-protocol-smoke"
       - name: Build unsigned Packet Tunnel extension target
         run: |
           xcodebuild \

@@ -110,11 +110,20 @@ function render({ platform, invoke }: BridgeUiOptions): void {
   document.getElementById("create-room")?.addEventListener("click", async () => {
     status.textContent = "正在创建房间…";
     try {
-      const result = await invoke("create_room", { settings: settings() });
-      input("room-code").value = String((result as { room_code: string }).room_code);
-      showResult(result);
+      const room = await invoke("create_room", { settings: settings() });
+      const roomCode = String((room as { room_code: string }).room_code);
+      input("room-code").value = roomCode;
+      const peer = await invoke("join_room", {
+        settings: settings(),
+        roomCode,
+      });
+      input("peer-id").value = String((peer as { peer_id: string }).peer_id);
+      input("local-bind").value = `${String(
+        (peer as { virtual_ip: string }).virtual_ip,
+      )}:32000`;
+      showResult({ room, peer });
     } catch (error) {
-      status.textContent = `创建房间失败：${String(error)}`;
+      status.textContent = `创建并加入房间失败：${String(error)}`;
     }
   });
 
@@ -126,6 +135,9 @@ function render({ platform, invoke }: BridgeUiOptions): void {
         roomCode: value("room-code"),
       });
       input("peer-id").value = String((result as { peer_id: string }).peer_id);
+      input("local-bind").value = `${String(
+        (result as { virtual_ip: string }).virtual_ip,
+      )}:32000`;
       showResult(result);
     } catch (error) {
       status.textContent = `加入房间失败：${String(error)}`;

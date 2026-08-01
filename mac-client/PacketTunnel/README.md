@@ -5,6 +5,17 @@
 virtual route for Civ6's limited broadcast and the service virtual subnet,
 then reads packets from `NEPacketTunnelFlow`.
 
+`IPv4UDP.swift` owns bounded IPv4/UDP parsing and packet reconstruction,
+including IPv4 and UDP checksums. `RelayEnvelope.swift` mirrors the shared
+Rust envelope kinds and has a Swift smoke test under `Tests/ProtocolSmoke.swift`.
+The smoke test is compile-and-run checked in the macOS CI job and in the Swift
+Linux container used for local protocol validation.
+
+`Civ6PacketRouter.swift` maps only the supported discovery/gameplay packets to
+the envelope and back. It keeps discovery request IDs by source virtual IP so
+multiple host sessions remain distinguishable; it does not forward arbitrary
+IP traffic.
+
 The provider is deliberately marked as a Phase 3 integration target: the
 current Linux workspace can compile the shared Rust protocol and Tauri UI, but
 cannot compile or sign Apple's Network Extension. The macOS CI job type-checks,
