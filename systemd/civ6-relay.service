@@ -1,20 +1,26 @@
 [Unit]
-Description=Civilization VI WireGuard UDP relay
+Description=Civilization VI LAN Bridge control API and UDP relay
 After=network-online.target wg-quick@wg0.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/civ6-lan-bridge
-EnvironmentFile=/etc/civ6-relay.env
-ExecStart=/usr/bin/python3 /opt/civ6-lan-bridge/server/civ6-relay.py
+User=civ6-relay
+Group=civ6-relay
+EnvironmentFile=/etc/civ6-lan-bridge.env
+ExecStart=/usr/local/bin/civ6-lan-server
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/run
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/civ6-lan-bridge
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target

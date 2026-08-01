@@ -21,29 +21,38 @@
 公网客户端
    │  WireGuard UDP
    ▼
-wg0: 10.10.0.1/24
+wg0: 10.240.0.1/24
    │
    └── Civ6 relay → 当前房主的 10.10.0.X
 ```
 
-## 2. Current relay prototype
+## 2. Rust MVP service
 
-先用当前代码验证网络路径：
+MVP 运行 Rust 控制面和 UDP relay；Python 文件只保留为早期 loopback
+prototype，不应被 systemd 作为生产入口启动：
 
 ```bash
-sudo install -d /opt/civ6-lan-bridge
-sudo cp -a server /opt/civ6-lan-bridge/
+git clone <repository> /opt/civ6-lan-bridge
+cd /opt/civ6-lan-bridge
+cargo build --release -p civ6-lan-server
+sudo useradd --system --home-dir /var/lib/civ6-lan-bridge \
+  --shell /usr/sbin/nologin civ6-relay || true
+sudo install -d -o civ6-relay -g civ6-relay /var/lib/civ6-lan-bridge
+sudo install -o root -g root -m 0755 \
+  target/release/civ6-lan-server /usr/local/bin/civ6-lan-server
 sudo cp systemd/civ6-relay.service /etc/systemd/system/
-sudo cp config/civ6-relay.example.env /etc/civ6-relay.env
-sudoedit /etc/civ6-relay.env
+sudo cp config/civ6-relay.example.env /etc/civ6-lan-bridge.env
+sudo chmod 600 /etc/civ6-lan-bridge.env
+sudoedit /etc/civ6-lan-bridge.env
 ```
 
 至少设置：
 
 ```env
-CIV6_RELAY_LISTEN_IP=10.10.0.1
-CIV6_HOST_WG_IP=10.10.0.11
-CIV6_RELAY_ALLOWED_CIDRS=10.10.0.0/24
+CIV6_CONTROL_BIND=127.0.0.1:8080
+CIV6_CONTROL_BEARER_TOKEN=<至少 32 个随机字符>
+CIV6_RELAY_BIND=10.240.0.1:32000
+CIV6_WIREGUARD_INTERFACE=wg0
 ```
 
 启动并检查：
@@ -56,11 +65,10 @@ sudo journalctl -u civ6-relay -f
 sudo tcpdump -ni wg0 'udp portrange 62900-62999 or udp port 62056'
 ```
 
-防火墙只允许 WireGuard peer 访问 relay：
+防火墙只允许 WireGuard peer 访问 relay envelope 端口：
 
 ```bash
-sudo nft add rule inet filter input iifname "wg0" udp dport 62056 accept
-sudo nft add rule inet filter input iifname "wg0" udp dport 62900-62999 accept
+sudo nft add rule inet filter input iifname "wg0" udp dport 32000 accept
 ```
 
 真实环境应把规则写入持久化 nftables 配置，并先确认现有防火墙链不会重复添加规则。

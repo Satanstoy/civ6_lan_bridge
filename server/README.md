@@ -6,7 +6,7 @@
 2. Civ VI `62900-62999/UDP` 房间发现及 `62056/UDP` 游戏流量 relay；
 3. 房间码、在线客户端和动态 host session 的控制面。
 
-仓库里的 [`civ6-relay.py`](civ6-relay.py) 是早期单房主网络路径原型。正式 Rust 服务端不再把房主写死在环境变量里，而是按 room、peer 和 host session 路由。
+仓库里的 [`civ6-relay.py`](civ6-relay.py) 是早期单房主网络路径原型，不能作为生产 systemd 入口。正式 Rust 服务端不再把房主写死在环境变量里，而是按 room、peer 和 host session 路由。
 
 正式技术基线见 [`docs/spec.md`](../docs/spec.md)。2–10 人 MVP 使用 Rust stable、Tokio、Axum、内存路由状态、systemd 和 nftables；PostgreSQL/SQLx 作为 Production profile 的可选持久化层。当前 Python 文件只用于网络路径验证，不是正式多房间服务端。
 
@@ -53,6 +53,6 @@ Windows 正式客户端按 Microsoft Windows Filtering Platform 设计；WinDive
 
 部署时只把控制 API 放在 HTTPS 后面；Civ VI UDP relay 只接受 WireGuard peer 来源，不暴露为公网开放 UDP 转发器。
 
-Rust 数据面已提供绑定 `CIV6_RELAY_BIND` 的真实 UDP envelope relay。它不直接转发公网任意 UDP，而是只接受 WireGuard 虚拟地址对应的已登记 peer，并将 `request_id`、`host_session_id`、`gameplay_session_id` 和虚拟源地址带到客户端适配器。共享 client core 已通过真实 UDP socket probe 测试；Windows WFP 和 macOS Network Extension 的 Civ6 注入适配器尚未完成，因此当前仍不能宣称已经交付可直接进行 Civ6 联机的 `.exe`/`.dmg`。
+Rust 数据面已提供绑定 `CIV6_RELAY_BIND` 的真实 UDP envelope relay。它不直接转发公网任意 UDP，而是只接受 WireGuard 虚拟地址对应的已登记 peer，并将 `request_id`、`host_session_id`、`gameplay_session_id` 和虚拟源地址带到客户端适配器。共享 client core 已通过真实 UDP socket probe 测试；systemd 应启动 `/usr/local/bin/civ6-lan-server`，而不是早期 Python prototype。Windows WFP 和 macOS Network Extension 的 Civ6 注入适配器尚未完成，因此当前仍不能宣称已经交付可直接进行 Civ6 联机的 `.exe`/`.dmg`。
 
 relay envelope 的字段和方向见 [`docs/protocol.md`](../docs/protocol.md)；默认服务端 relay 端口为 `32000/UDP`，Civ VI 原始端口仍只允许 `62900-62999/UDP` 和 `62056/UDP`。
