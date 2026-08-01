@@ -115,8 +115,11 @@ jobs:
             -o "$RUNNER_TEMP/civ6-lan-bridge-protocol-smoke"
           "$RUNNER_TEMP/civ6-lan-bridge-protocol-smoke"
       - name: Build unsigned Packet Tunnel extension target
+        id: build-packet-tunnel
+        continue-on-error: true
         run: |
-          xcodebuild \
+          set -o pipefail
+          xcodebuild -verbose \
             -project mac-client/PacketTunnel/PacketTunnel.xcodeproj \
             -target PacketTunnel \
             -configuration Release \
@@ -125,7 +128,17 @@ jobs:
             ARCHS=${{ matrix.arch }} \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            build
+            build 2>&1 | tee "$RUNNER_TEMP/packet-tunnel-xcodebuild.log"
+      - name: Upload Packet Tunnel build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: civ6-lan-bridge-packet-tunnel-build-log-${{ matrix.arch }}
+          path: ${{ runner.temp }}/packet-tunnel-xcodebuild.log
+          if-no-files-found: error
+      - name: Fail if Packet Tunnel build failed
+        if: steps.build-packet-tunnel.outcome == 'failure'
+        run: exit 1
       - name: Upload unsigned Packet Tunnel validation artifact
         uses: actions/upload-artifact@v4
         with:
