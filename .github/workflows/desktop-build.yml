@@ -91,6 +91,10 @@ jobs:
           cache: npm
           cache-dependency-path: mac-client/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare loopback aliases for live UDP tests
+        run: |
+          sudo ifconfig lo0 alias 127.0.0.2 255.0.0.0 || true
+          sudo ifconfig lo0 alias 127.0.0.3 255.0.0.0 || true
       - name: Verify shared server and relay tests on macOS toolchain
         run: cargo test --workspace
       - name: Type-check Network Extension provider
