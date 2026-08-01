@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "macOS": {
+      "files": {
+        "PlugIns/PacketTunnel.appex": "../PacketTunnel/build/PacketTunnel.appex"
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@civ6-lan-bridge/ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/main.ts"
+  }
+}

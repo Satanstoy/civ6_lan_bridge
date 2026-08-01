@@ -1,0 +1,13 @@
+[package]
+name = "civ6-lan-router"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+civ6-lan-protocol = { path = "../protocol" }
+thiserror = "2"
+
+[dev-dependencies]
+pretty_assertions = "1"

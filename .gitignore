@@ -1,0 +1,32 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Local deployment configuration and credentials. Keep only *.example.env in git.
+config/*.env
+!config/*.example.env
+*.local
+*.local.*
+
+# Private keys and secret material
+*.key
+*.private
+*.pem
+*.p12
+*.pfx
+*.secret
+*.token
+*.credentials
+
+# Local packet captures and runtime output
+captures/
+logs/
+
+# Build and dependency output
+target/
+.cargo/
+node_modules/
+dist/
+__pycache__/
+*.pyc

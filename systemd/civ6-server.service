@@ -1,0 +1,27 @@
+[Unit]
+Description=Civ6 LAN Bridge Rust control plane
+After=network-online.target postgresql.service wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=civ6
+Group=civ6
+WorkingDirectory=/opt/civ6-lan-bridge
+EnvironmentFile=/etc/civ6-server.env
+ExecStart=/opt/civ6-lan-bridge/bin/civ6-lan-server
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run
+
+# Required only when CIV6_WIREGUARD_INTERFACE is enabled and the service
+# manages peers with wg set. Review the host's least-privilege policy first.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

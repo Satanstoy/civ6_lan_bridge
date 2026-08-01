@@ -1,0 +1,20 @@
+# macOS Packet Tunnel target
+
+`PacketTunnel.xcodeproj` is the minimal Network Extension target used by CI.
+`PacketTunnelProvider.swift` is its lifecycle boundary. It creates a narrow
+virtual route for Civ6's limited broadcast and the service virtual subnet,
+then reads packets from `NEPacketTunnelFlow`.
+
+The provider is deliberately marked as a Phase 3 integration target: the
+current Linux workspace can compile the shared Rust protocol and Tauri UI, but
+cannot compile or sign Apple's Network Extension. The macOS CI job type-checks,
+builds an unsigned `.appex`, and embeds it into the candidate Tauri App under
+`Contents/PlugIns` through `tauri.ci.conf.json`. A production macOS target
+must still embed the Rust transport sidecar, decode IPv4/UDP, and pass only UDP
+`62900-62999` and `62056` datagrams into the shared relay envelope. It must
+not become a generic proxy or silently forward all system traffic.
+
+Release prerequisites are the Network Extension entitlement, Developer ID
+signing, hardened runtime, notarization and staple. Test on Intel and Apple
+Silicon with Mac↔Windows and Mac↔Mac games, including the 2K age-verification
+precondition and repeated long games.
