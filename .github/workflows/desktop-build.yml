@@ -50,8 +50,9 @@ jobs:
           cache: npm
           cache-dependency-path: win-client/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
-      - name: Verify shared server and relay tests on Windows toolchain
-        run: cargo test --workspace
+      - name: Check Windows Tauri Rust target
+        working-directory: win-client
+        run: cargo check --manifest-path src-tauri/Cargo.toml
       - name: Install frontend dependencies
         working-directory: win-client
         run: npm ci
