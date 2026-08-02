@@ -77,7 +77,7 @@ function settings(): Settings {
   return {
     control_url: "http://127.0.0.1:8080",
     bearer_token: "",
-    relay_server: "10.240.0.1",
+    relay_server: "10.240.0.1:32000",
     relay_port: 32000,
   };
 }

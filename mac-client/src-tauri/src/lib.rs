@@ -1,4 +1,10 @@
-use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    env,
+    fs,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    time::Duration,
+};
 
 use civ6_lan_client_core::{ClientConfig, ControlClient, RelayClient};
 use civ6_lan_protocol::{HostSessionId, PeerId, RoomCode};
@@ -14,13 +20,20 @@ pub struct ClientSettings {
 
 impl ClientSettings {
     fn config(&self) -> Result<ClientConfig, String> {
+        let relay_server = self
+            .relay_server
+            .parse::<SocketAddr>()
+            .or_else(|_| {
+                self.relay_server
+                    .parse::<IpAddr>()
+                    .map(|ip| SocketAddr::new(ip, self.relay_port))
+            })
+            .map_err(|error| format!("invalid relay address: {error}"))?;
+
         Ok(ClientConfig {
             control_url: self.control_url.clone(),
             bearer_token: self.bearer_token.clone(),
-            relay_server: self
-                .relay_server
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("invalid relay address: {error}"))?,
+            relay_server,
             relay_port: self.relay_port,
         })
     }
