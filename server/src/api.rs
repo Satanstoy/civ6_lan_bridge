@@ -1,5 +1,9 @@
 use std::time::{Duration, Instant};
 
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
@@ -10,10 +14,14 @@ use axum::{
 use civ6_lan_protocol::{GameplaySessionId, HostSessionId, PeerId, RoomCode, RoomId, VirtualIp};
 use civ6_lan_router::{GameplaySnapshot, HostSnapshot, RoomSnapshot, RouterError};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     metrics::RelayMetricsSnapshot,
-    state::{allocate_virtual_ip, parse_room_code, AppState},
+    state::{
+        allocate_virtual_ip, parse_room_code, AppState, ClientSession, UserAccount,
+        CLIENT_SESSION_TTL,
+    },
     wireguard::WireGuardError,
 };
 
@@ -116,10 +124,24 @@ pub struct CreateRoomRequest {
     pub room_code: Option<RoomCode>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AuthRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AuthResponse {
+    pub username: String,
+    pub access_token: String,
+    pub expires_in_seconds: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct JoinRoomRequest {
     pub peer_id: Option<PeerId>,
     pub wireguard_public_key: Option<String>,
+    pub requested_virtual_ip: Option<VirtualIp>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -184,6 +206,8 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/v1/auth/register", post(register_user))
+        .route("/v1/auth/login", post(login_user))
         .route("/v1/test/metrics", get(test_metrics))
         .route("/v1/rooms", post(create_room))
         .route("/v1/rooms/{code}/join", post(join_room))
@@ -202,6 +226,58 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/rooms/{code}/peers/{peer_id}", delete(delete_peer))
         .route("/v1/rooms/{code}", delete(delete_room))
         .with_state(state)
+}
+
+async fn register_user(
+    State(state): State<AppState>,
+    Json(payload): Json<AuthRequest>,
+) -> Result<(StatusCode, Json<AuthResponse>), ApiError> {
+    let username = validate_username(&payload.username)?;
+    validate_password(&payload.password)?;
+    if !state.api_rate_limiter.allow(format!("register:{username}")) {
+        return Err(ApiError::RateLimited);
+    }
+    let password_hash = hash_password(&payload.password)?;
+    {
+        let mut users = state
+            .users
+            .lock()
+            .map_err(|_| ApiError::Internal("user store is unavailable".to_owned()))?;
+        if users.contains_key(&username) {
+            return Err(ApiError::Conflict(
+                "username is already registered".to_owned(),
+            ));
+        }
+        users.insert(username.clone(), UserAccount { password_hash });
+    }
+    let response = create_client_session(&state, username)?;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn login_user(
+    State(state): State<AppState>,
+    Json(payload): Json<AuthRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let username = validate_username(&payload.username)?;
+    if !state.api_rate_limiter.allow(format!("login:{username}")) {
+        return Err(ApiError::RateLimited);
+    }
+    let password_hash = {
+        let users = state
+            .users
+            .lock()
+            .map_err(|_| ApiError::Internal("user store is unavailable".to_owned()))?;
+        users
+            .get(&username)
+            .map(|account| account.password_hash.clone())
+            .ok_or(ApiError::Unauthorized)?
+    };
+    let parsed_hash = PasswordHash::new(&password_hash)
+        .map_err(|_| ApiError::Internal("stored password hash is invalid".to_owned()))?;
+    Argon2::default()
+        .verify_password(payload.password.as_bytes(), &parsed_hash)
+        .map_err(|_| ApiError::Unauthorized)?;
+    Ok(Json(create_client_session(&state, username)?))
 }
 
 async fn health_live(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -231,7 +307,7 @@ async fn test_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RelayMetricsSnapshot>, ApiError> {
-    require_bearer(&headers, &state)?;
+    require_admin_bearer(&headers, &state)?;
     let router = state.router.read().await;
     Ok(Json(state.metrics.snapshot(router.stats())))
 }
@@ -289,8 +365,25 @@ async fn join_room(
         let room_id = router
             .room_id_for_code(&room_code)
             .ok_or_else(|| ApiError::NotFound("room does not exist".to_owned()))?;
-        let virtual_ip = allocate_virtual_ip(&router, state.virtual_ip_prefix)
-            .ok_or_else(|| ApiError::Conflict("virtual IP pool is exhausted".to_owned()))?;
+        let virtual_ip = match payload.requested_virtual_ip {
+            Some(requested) => {
+                let octets = requested.address().octets();
+                if octets[..3] != state.virtual_ip_prefix || octets[3] < 2 {
+                    return Err(ApiError::BadRequest(
+                        "requested virtual IP is outside the configured WireGuard subnet"
+                            .to_owned(),
+                    ));
+                }
+                if !router.is_virtual_ip_available(requested) {
+                    return Err(ApiError::Conflict(
+                        "requested virtual IP is already assigned".to_owned(),
+                    ));
+                }
+                requested
+            }
+            None => allocate_virtual_ip(&router, state.virtual_ip_prefix)
+                .ok_or_else(|| ApiError::Conflict("virtual IP pool is exhausted".to_owned()))?,
+        };
         router.join_room(room_id, peer_id, virtual_ip)?;
         let connection_epoch = router.peer_connection_epoch(peer_id)?;
         (room_id, virtual_ip, connection_epoch)
@@ -611,7 +704,7 @@ async fn delete_room(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn require_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
+fn require_admin_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     let expected = format!("Bearer {}", state.bearer_token);
     let provided = headers
         .get(header::AUTHORIZATION)
@@ -629,6 +722,91 @@ fn require_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError>
         state.metrics.record_authentication_failure();
         Err(ApiError::Unauthorized)
     }
+}
+
+fn require_bearer(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
+    let provided = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let Some(token) = provided else {
+        state.metrics.record_authentication_failure();
+        return Err(ApiError::Unauthorized);
+    };
+    if token == state.bearer_token.as_ref() {
+        return state
+            .api_rate_limiter
+            .allow(token.to_owned())
+            .then_some(())
+            .ok_or(ApiError::RateLimited);
+    }
+
+    let now = Instant::now();
+    let authenticated = state
+        .client_sessions
+        .lock()
+        .map(|mut sessions| {
+            sessions.retain(|_, session| session.expires_at > now);
+            sessions.contains_key(token)
+        })
+        .unwrap_or(false);
+    if !authenticated {
+        state.metrics.record_authentication_failure();
+        return Err(ApiError::Unauthorized);
+    }
+    state
+        .api_rate_limiter
+        .allow(token.to_owned())
+        .then_some(())
+        .ok_or(ApiError::RateLimited)
+}
+
+fn validate_username(value: &str) -> Result<String, ApiError> {
+    let username = value.trim().to_lowercase();
+    let length = username.chars().count();
+    if !(2..=24).contains(&length)
+        || username
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(ApiError::BadRequest(
+            "username must contain 2 to 24 non-whitespace characters".to_owned(),
+        ));
+    }
+    Ok(username)
+}
+
+fn validate_password(value: &str) -> Result<(), ApiError> {
+    if !(6..=128).contains(&value.chars().count()) {
+        return Err(ApiError::BadRequest(
+            "password must contain 6 to 128 characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn hash_password(password: &str) -> Result<String, ApiError> {
+    let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes())
+        .map_err(|_| ApiError::Internal("failed to generate password salt".to_owned()))?;
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|_| ApiError::Internal("failed to hash password".to_owned()))
+}
+
+fn create_client_session(state: &AppState, username: String) -> Result<AuthResponse, ApiError> {
+    let access_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let expires_at = Instant::now() + CLIENT_SESSION_TTL;
+    state
+        .client_sessions
+        .lock()
+        .map_err(|_| ApiError::Internal("session store is unavailable".to_owned()))?
+        .insert(access_token.clone(), ClientSession { expires_at });
+    Ok(AuthResponse {
+        username,
+        access_token,
+        expires_in_seconds: CLIENT_SESSION_TTL.as_secs(),
+    })
 }
 
 fn room_response(snapshot: RoomSnapshot) -> RoomResponse {
@@ -697,6 +875,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn registered_user_can_create_and_join_a_room_with_requested_wireguard_ip() {
+        let app = build_router(AppState::new("test-token").with_virtual_ip_prefix([10, 10, 0]));
+        let registered = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/register")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"username":"Alice","password":"secret12"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(registered.status(), StatusCode::CREATED);
+        let body = registered.into_body().collect().await.unwrap().to_bytes();
+        let auth: AuthResponse = serde_json::from_slice(&body).unwrap();
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rooms")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", auth.access_token),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"room_code":"RMAUTH"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::CREATED);
+
+        let joined = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rooms/RMAUTH/join")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", auth.access_token),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"requested_virtual_ip":"10.10.0.11"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(joined.status(), StatusCode::CREATED);
+        let body = joined.into_body().collect().await.unwrap().to_bytes();
+        let peer: PeerResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            peer.virtual_ip.address(),
+            "10.10.0.11".parse::<std::net::Ipv4Addr>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1065,6 +1304,7 @@ mod tests {
                 &serde_json::to_string(&JoinRoomRequest {
                     peer_id: Some(peer.peer_id),
                     wireguard_public_key: None,
+                    requested_virtual_ip: None,
                 })
                 .unwrap(),
             ))

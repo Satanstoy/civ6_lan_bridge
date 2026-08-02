@@ -29,6 +29,12 @@ type PeerResponse = {
   virtual_ip: string;
 };
 
+type AuthResponse = {
+  username: string;
+  access_token: string;
+  expires_in_seconds: number;
+};
+
 type Room = {
   code: string;
   memberCount: number;
@@ -41,6 +47,7 @@ type Reachability = "checking" | "healthy" | "offline";
 
 const RECENT_ROOMS_KEY = "civ6-lan-bridge.recent-rooms";
 const USER_KEY = "civ6-lan-bridge.user";
+const TOKEN_KEY = "civ6-lan-bridge.access-token";
 
 function escapeHtml(value: string): string {
   return value.replace(
@@ -76,6 +83,20 @@ function describeError(error: unknown): string {
   return message;
 }
 
+function describeAuthError(error: unknown, mode: "register" | "login"): string {
+  const message = String(error);
+  if (/401|unauthorized|valid bearer token/i.test(message)) {
+    return "用户名或密码不正确。";
+  }
+  if (/username is already registered|409|conflict/i.test(message)) {
+    return "这个用户名已经被使用，请登录或更换用户名。";
+  }
+  if (/username must|password must|400|bad request/i.test(message)) {
+    return mode === "register" ? "请检查用户名和密码格式。" : "用户名或密码格式不正确。";
+  }
+  return describeError(error);
+}
+
 function readRecentRooms(): string[] {
   try {
     const value = JSON.parse(localStorage.getItem(RECENT_ROOMS_KEY) ?? "[]");
@@ -93,12 +114,10 @@ function saveRecentRoom(code: string): void {
 }
 
 function settings(): Settings {
-  // The relay endpoint and bearer token are deliberately not rendered in the
-  // user UI. Production packaging will provide these through the native shell.
   return {
-    control_url: "http://127.0.0.1:8080",
-    bearer_token: "",
-    relay_server: "10.240.0.1:32000",
+    control_url: "https://satanstoy.site/civ6-api",
+    bearer_token: localStorage.getItem(TOKEN_KEY) ?? "",
+    relay_server: "10.10.0.1:32000",
     relay_port: 32000,
   };
 }
@@ -119,7 +138,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
   const app = document.getElementById("app");
   if (!app) throw new Error("shared UI mount point #app is missing");
 
-  let view: View = localStorage.getItem(USER_KEY) ? "lobby" : "auth";
+  let view: View = localStorage.getItem(USER_KEY) && localStorage.getItem(TOKEN_KEY) ? "lobby" : "auth";
   let authMode: "register" | "login" = "register";
   let userName = localStorage.getItem(USER_KEY) ?? "";
   let currentRoom: Room | null = null;
@@ -358,7 +377,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
       notice = null;
       show();
     });
-    document.getElementById("auth-form")?.addEventListener("submit", (event) => {
+    document.getElementById("auth-form")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const name = inputValue("auth-username");
       const password = inputValue("auth-password");
@@ -367,16 +386,33 @@ function render({ platform, invoke }: BridgeUiOptions): void {
         show();
         return;
       }
-      userName = name;
-      localStorage.setItem(USER_KEY, userName);
-      view = "lobby";
-      notice = null;
+      setBusy(true);
       show();
-      void refreshServiceStatus();
+      try {
+        const auth = await invoke<AuthResponse>(authMode === "register" ? "register_user" : "login_user", {
+          settings: settings(),
+          username: name,
+          password,
+        });
+        userName = auth.username;
+        localStorage.setItem(USER_KEY, userName);
+        localStorage.setItem(TOKEN_KEY, auth.access_token);
+        view = "lobby";
+        notice = null;
+        serviceReachability = "checking";
+        show();
+        void refreshServiceStatus();
+      } catch (error) {
+        setNotice("error", describeAuthError(error, authMode));
+      } finally {
+        setBusy(false);
+        show();
+      }
     });
     document.getElementById("logout")?.addEventListener("click", () => {
       stopRoomPing();
       localStorage.removeItem(USER_KEY);
+      localStorage.removeItem(TOKEN_KEY);
       currentRoom = null;
       view = "auth";
       show();

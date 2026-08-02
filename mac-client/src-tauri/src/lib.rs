@@ -1,13 +1,13 @@
 use std::{
-    env,
-    fs,
-    net::{IpAddr, SocketAddr},
+    env, fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
+    process::Command,
     time::Duration,
 };
 
 use civ6_lan_client_core::{ClientConfig, ControlClient, RelayClient};
-use civ6_lan_protocol::{HostSessionId, PeerId, RoomCode};
+use civ6_lan_protocol::{HostSessionId, PeerId, RoomCode, VirtualIp};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -57,12 +57,33 @@ pub struct RelayProbeResult {
     pub relay_server: String,
 }
 
+fn detect_virtual_ip() -> Option<VirtualIp> {
+    if let Ok(value) = env::var("CIV6_VIRTUAL_IP") {
+        if let Ok(ip) = value.parse::<Ipv4Addr>() {
+            return Some(VirtualIp::new(ip));
+        }
+    }
+    let output = Command::new("/sbin/ifconfig").output().ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .filter_map(|candidate| candidate.parse::<Ipv4Addr>().ok())
+        .find(|ip| {
+            let octets = ip.octets();
+            octets[..3] == [10, 10, 0] && octets[3] >= 2
+        })
+        .map(VirtualIp::new)
+}
+
 #[tauri::command]
-fn load_test_manifest(path: Option<String>) -> Result<civ6_lan_client_core::TestSessionManifest, String> {
+fn load_test_manifest(
+    path: Option<String>,
+) -> Result<civ6_lan_client_core::TestSessionManifest, String> {
     let path = path
         .map(PathBuf::from)
         .or_else(|| env::var_os("CIV6_TEST_MANIFEST").map(PathBuf::from))
-        .ok_or_else(|| "CIV6_TEST_MANIFEST is not set and no manifest path was supplied".to_owned())?;
+        .ok_or_else(|| {
+            "CIV6_TEST_MANIFEST is not set and no manifest path was supplied".to_owned()
+        })?;
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("cannot read test manifest {}: {error}", path.display()))?;
     let manifest = serde_json::from_str(&content)
@@ -71,7 +92,9 @@ fn load_test_manifest(path: Option<String>) -> Result<civ6_lan_client_core::Test
 }
 
 #[tauri::command]
-async fn health_live(settings: ClientSettings) -> Result<civ6_lan_client_core::HealthResponse, String> {
+async fn health_live(
+    settings: ClientSettings,
+) -> Result<civ6_lan_client_core::HealthResponse, String> {
     ControlClient::new(settings.config()?)
         .health_live()
         .await
@@ -79,7 +102,33 @@ async fn health_live(settings: ClientSettings) -> Result<civ6_lan_client_core::H
 }
 
 #[tauri::command]
-async fn create_room(settings: ClientSettings) -> Result<civ6_lan_client_core::RoomResponse, String> {
+async fn register_user(
+    settings: ClientSettings,
+    username: String,
+    password: String,
+) -> Result<civ6_lan_client_core::AuthResponse, String> {
+    ControlClient::new(settings.config()?)
+        .register_user(&username, &password)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn login_user(
+    settings: ClientSettings,
+    username: String,
+    password: String,
+) -> Result<civ6_lan_client_core::AuthResponse, String> {
+    ControlClient::new(settings.config()?)
+        .login_user(&username, &password)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn create_room(
+    settings: ClientSettings,
+) -> Result<civ6_lan_client_core::RoomResponse, String> {
     ControlClient::new(settings.config()?)
         .create_room(None)
         .await
@@ -106,7 +155,7 @@ async fn join_room(
         .parse::<RoomCode>()
         .map_err(|error| format!("invalid room code: {error}"))?;
     ControlClient::new(settings.config()?)
-        .join_room(&room_code, None, None)
+        .join_room_with_virtual_ip(&room_code, None, None, detect_virtual_ip())
         .await
         .map_err(|error| error.to_string())
 }
@@ -179,6 +228,8 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             health_live,
+            register_user,
+            login_user,
             create_room,
             delete_room,
             join_room,

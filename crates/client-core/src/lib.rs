@@ -101,6 +101,32 @@ impl ControlClient {
             .await
     }
 
+    pub async fn register_user(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<AuthResponse, ClientError> {
+        self.request(
+            reqwest::Method::POST,
+            "/v1/auth/register",
+            &AuthRequest { username, password },
+        )
+        .await
+    }
+
+    pub async fn login_user(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<AuthResponse, ClientError> {
+        self.request(
+            reqwest::Method::POST,
+            "/v1/auth/login",
+            &AuthRequest { username, password },
+        )
+        .await
+    }
+
     pub async fn create_room(
         &self,
         room_code: Option<RoomCode>,
@@ -119,12 +145,24 @@ impl ControlClient {
         peer_id: Option<PeerId>,
         wireguard_public_key: Option<String>,
     ) -> Result<PeerResponse, ClientError> {
+        self.join_room_with_virtual_ip(room_code, peer_id, wireguard_public_key, None)
+            .await
+    }
+
+    pub async fn join_room_with_virtual_ip(
+        &self,
+        room_code: &RoomCode,
+        peer_id: Option<PeerId>,
+        wireguard_public_key: Option<String>,
+        requested_virtual_ip: Option<VirtualIp>,
+    ) -> Result<PeerResponse, ClientError> {
         self.request(
             reqwest::Method::POST,
             &format!("/v1/rooms/{room_code}/join"),
             &JoinRoomRequest {
                 peer_id,
                 wireguard_public_key,
+                requested_virtual_ip,
             },
         )
         .await
@@ -744,6 +782,13 @@ pub struct HealthResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct AuthResponse {
+    pub username: String,
+    pub access_token: String,
+    pub expires_in_seconds: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RoomResponse {
     pub room_id: RoomId,
     pub room_code: RoomCode,
@@ -812,9 +857,16 @@ struct CreateRoomRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct AuthRequest<'a> {
+    username: &'a str,
+    password: &'a str,
+}
+
+#[derive(Debug, Serialize)]
 struct JoinRoomRequest {
     peer_id: Option<PeerId>,
     wireguard_public_key: Option<String>,
+    requested_virtual_ip: Option<VirtualIp>,
 }
 
 #[derive(Debug, Serialize)]

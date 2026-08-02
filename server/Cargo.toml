@@ -6,6 +6,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
+argon2 = "0.5"
 axum = "0.8"
 base64 = "0.22"
 civ6-lan-client-core = { path = "../crates/client-core" }

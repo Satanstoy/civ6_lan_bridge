@@ -15,6 +15,17 @@ use crate::wireguard::{WireGuardError, WireGuardManager};
 
 const API_REQUESTS_PER_SECOND: u64 = 120;
 const UDP_PACKETS_PER_SECOND: u64 = 2_000;
+pub const CLIENT_SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+#[derive(Clone)]
+pub struct UserAccount {
+    pub password_hash: String,
+}
+
+#[derive(Clone, Copy)]
+pub struct ClientSession {
+    pub expires_at: Instant,
+}
 
 #[derive(Clone)]
 pub struct FixedWindowRateLimiter {
@@ -68,6 +79,8 @@ pub struct AppState {
     pub database: Option<Database>,
     pub wireguard: Option<WireGuardManager>,
     pub peer_keys: Arc<RwLock<HashMap<PeerId, String>>>,
+    pub users: Arc<Mutex<HashMap<String, UserAccount>>>,
+    pub client_sessions: Arc<Mutex<HashMap<String, ClientSession>>>,
     pub metrics: RelayMetrics,
     pub api_rate_limiter: FixedWindowRateLimiter,
     pub udp_rate_limiter: FixedWindowRateLimiter,
@@ -82,6 +95,8 @@ impl AppState {
             database: None,
             wireguard: None,
             peer_keys: Arc::new(RwLock::new(HashMap::new())),
+            users: Arc::new(Mutex::new(HashMap::new())),
+            client_sessions: Arc::new(Mutex::new(HashMap::new())),
             metrics: RelayMetrics::default(),
             api_rate_limiter: FixedWindowRateLimiter::new(
                 API_REQUESTS_PER_SECOND,

@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/civ6-lan-bridge
+WorkingDirectory=/var/lib/civ6-lan-bridge
 User=civ6-relay
 Group=civ6-relay
 EnvironmentFile=/etc/civ6-lan-bridge.env
