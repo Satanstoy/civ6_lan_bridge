@@ -58,6 +58,7 @@ PACKET_PROFILE_UUID="$(profile_value "$PACKET_PROFILE_PATH" UUID)"
 PACKET_PROFILE_APP_ID="$(profile_value "$PACKET_PROFILE_PATH" Entitlements:application-identifier)"
 APP_NETWORK_EXTENSION="$(profile_value "$APP_PROFILE_PATH" Entitlements:com.apple.developer.networking.networkextension)"
 PACKET_NETWORK_EXTENSION="$(profile_value "$PACKET_PROFILE_PATH" Entitlements:com.apple.developer.networking.networkextension)"
+APP_SYSTEM_EXTENSION_INSTALL="$(profile_value "$APP_PROFILE_PATH" Entitlements:com.apple.developer.system-extension.install)"
 
 EXPECTED_APP_ID="$APPLE_TEAM_ID.com.civ6lanbridge.macos"
 EXPECTED_PACKET_ID="$APPLE_TEAM_ID.com.civ6lanbridge.macos.packet-tunnel"
@@ -69,12 +70,16 @@ if [[ "$PACKET_PROFILE_APP_ID" != "$EXPECTED_PACKET_ID" ]]; then
   echo "Packet Tunnel provisioning profile is for $PACKET_PROFILE_APP_ID, expected $EXPECTED_PACKET_ID" >&2
   exit 1
 fi
-if [[ "$APP_NETWORK_EXTENSION" != *packet-tunnel-provider* ]]; then
+if [[ "$APP_NETWORK_EXTENSION" != *packet-tunnel-provider-systemextension* ]]; then
   echo "App provisioning profile does not contain the Packet Tunnel Provider entitlement" >&2
   exit 1
 fi
-if [[ "$PACKET_NETWORK_EXTENSION" != *packet-tunnel-provider* ]]; then
+if [[ "$PACKET_NETWORK_EXTENSION" != *packet-tunnel-provider-systemextension* ]]; then
   echo "Packet Tunnel provisioning profile does not contain the Packet Tunnel Provider entitlement" >&2
+  exit 1
+fi
+if [[ "$APP_SYSTEM_EXTENSION_INSTALL" != true ]]; then
+  echo "App provisioning profile does not authorize system extension installation" >&2
   exit 1
 fi
 

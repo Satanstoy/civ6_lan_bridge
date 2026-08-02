@@ -14,7 +14,7 @@ if [[ -z "$APP_PATH" ]]; then
   exit 1
 fi
 
-PACKET_TUNNEL_PATH="$APP_PATH/Contents/PlugIns/PacketTunnel.appex"
+PACKET_TUNNEL_PATH="$APP_PATH/Contents/Library/SystemExtensions/PacketTunnel.systemextension"
 APP_ENTITLEMENTS="$GITHUB_WORKSPACE/mac-client/src-tauri/Entitlements.plist"
 PACKET_TUNNEL_ENTITLEMENTS="$GITHUB_WORKSPACE/mac-client/PacketTunnel/PacketTunnel.entitlements"
 DMG_DIR="$GITHUB_WORKSPACE/mac-client/src-tauri/target/release/bundle/dmg"

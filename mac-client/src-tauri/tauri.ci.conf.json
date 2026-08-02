@@ -2,7 +2,7 @@
   "bundle": {
     "macOS": {
       "files": {
-        "PlugIns/PacketTunnel.appex": "../PacketTunnel/build/PacketTunnel.appex"
+        "Library/SystemExtensions/PacketTunnel.systemextension": "../PacketTunnel/build/PacketTunnel.systemextension"
       }
     }
   }

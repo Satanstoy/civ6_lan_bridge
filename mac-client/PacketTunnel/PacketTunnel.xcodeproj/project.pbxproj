@@ -18,7 +18,7 @@
 		B00000000000000000000001 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		B00000000000000000000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B00000000000000000000003 /* PacketTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PacketTunnel.entitlements; sourceTree = "<group>"; };
-		B00000000000000000000004 /* PacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000004 /* PacketTunnel.systemextension */ = {isa = PBXFileReference; explicitFileType = wrapper.system-extension; includeInIndex = 0; path = PacketTunnel.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000005 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
 		B00000000000000000000006 /* IPv4UDP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPv4UDP.swift; sourceTree = "<group>"; };
 		B00000000000000000000007 /* RelayEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayEnvelope.swift; sourceTree = "<group>"; };
@@ -70,7 +70,7 @@
 		D00000000000000000000004 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				B00000000000000000000004 /* PacketTunnel.appex */,
+				B00000000000000000000004 /* PacketTunnel.systemextension */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -92,8 +92,8 @@
 			);
 			name = PacketTunnel;
 			productName = PacketTunnel;
-			productReference = B00000000000000000000004 /* PacketTunnel.appex */;
-			productType = "com.apple.product-type.app-extension";
+			productReference = B00000000000000000000004 /* PacketTunnel.systemextension */;
+			productType = "com.apple.product-type.system-extension";
 		};
 /* End PBXNativeTarget section */
 

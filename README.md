@@ -103,7 +103,7 @@ sudo systemctl restart civ6-relay
 
 `win-client/` 和 `mac-client/` 使用各自的 Tauri 原生壳，但 UI 入口、样式和 TypeScript 编译配置来自 `clients/ui/`。因此 UI 修改只维护一份；平台差异只能进入 Tauri Rust 命令、Windows WFP 或 macOS Network Extension。
 
-本仓库的 `.github/workflows/desktop-build.yml` 在 Windows runner 生成 NSIS `.exe`，在 Apple Silicon macOS runner 生成 ARM64 DMG，并把 Packet Tunnel `.appex` 嵌入 App 的 `Contents/PlugIns`。普通分支构建只上传未签名 CI 验证 artifact；推送 `v*` tag 时，macOS job 必须先通过 Developer ID、Network Extension provisioning profile、Hardened Runtime、notarization 和 staple 检查，release job 才会发布 DMG。这样不会再把未签名 DMG 当作用户安装包。
+本仓库的 `.github/workflows/desktop-build.yml` 在 Windows runner 生成 NSIS `.exe`，在 Apple Silicon macOS runner 生成 ARM64 DMG，并把 Packet Tunnel System Extension 嵌入 App 的 `Contents/Library/SystemExtensions`。普通分支构建只上传未签名 CI 验证 artifact；推送 `v*` tag 时，macOS job 必须先通过 Developer ID、Network Extension provisioning profile、Hardened Runtime、notarization 和 staple 检查，release job 才会发布 DMG。这样不会再把未签名 DMG 当作用户安装包。
 
 ### macOS release 签名配置
 

@@ -286,14 +286,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: civ6-lan-bridge-packet-tunnel-${{ matrix.arch }}
-          path: mac-client/PacketTunnel/.build/${{ matrix.arch }}/Build/Products/Release/PacketTunnel.appex
+          path: mac-client/PacketTunnel/.build/${{ matrix.arch }}/Build/Products/Release/PacketTunnel.systemextension
           if-no-files-found: error
       - name: Stage Packet Tunnel for the candidate App bundle
         run: |
           mkdir -p mac-client/PacketTunnel/build
           ditto \
-            "mac-client/PacketTunnel/.build/${{ matrix.arch }}/Build/Products/Release/PacketTunnel.appex" \
-            mac-client/PacketTunnel/build/PacketTunnel.appex
+            "mac-client/PacketTunnel/.build/${{ matrix.arch }}/Build/Products/Release/PacketTunnel.systemextension" \
+            mac-client/PacketTunnel/build/PacketTunnel.systemextension
       - name: Install frontend dependencies
         working-directory: mac-client
         run: npm ci
@@ -309,11 +309,11 @@ jobs:
         run: |
           APP_PATH="$(find mac-client/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$APP_PATH"
-          test -d "$APP_PATH/Contents/PlugIns/PacketTunnel.appex"
+          test -d "$APP_PATH/Contents/Library/SystemExtensions/PacketTunnel.systemextension"
           test -n "$(find "$APP_PATH/Contents/MacOS" -type f -perm -111 -print -quit)"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             test -f "$APP_PATH/Contents/embedded.provisionprofile"
-            test -f "$APP_PATH/Contents/PlugIns/PacketTunnel.appex/Contents/embedded.provisionprofile"
+            test -f "$APP_PATH/Contents/Library/SystemExtensions/PacketTunnel.systemextension/Contents/embedded.provisionprofile"
           fi
       - name: Sign, notarize, and staple macOS release DMG
         if: startsWith(github.ref, 'refs/tags/v')
@@ -341,9 +341,9 @@ jobs:
           trap cleanup EXIT
           APP_ON_DMG="$(find "$MOUNT_POINT" -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$APP_ON_DMG"
-          test -d "$APP_ON_DMG/Contents/PlugIns/PacketTunnel.appex"
+          test -d "$APP_ON_DMG/Contents/Library/SystemExtensions/PacketTunnel.systemextension"
           test -n "$(find "$APP_ON_DMG/Contents/MacOS" -type f -perm -111 -print -quit)"
-          echo "macOS DMG mounted and contains the app plus PacketTunnel.appex"
+          echo "macOS DMG mounted and contains the app plus PacketTunnel.systemextension"
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
