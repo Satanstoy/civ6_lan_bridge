@@ -278,7 +278,7 @@ jobs:
 
   macos-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: macos-dmg
+    needs: [windows-exe, macos-dmg]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -286,38 +286,46 @@ jobs:
       - name: Download macOS DMG artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: civ6-lan-bridge-macos-*-dmg
-          path: release-artifacts
-          merge-multiple: false
+          name: civ6-lan-bridge-macos-arm64-dmg
+          path: release-artifacts/macos
+      - name: Download Windows EXE artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: civ6-lan-bridge-windows-exe
+          path: release-artifacts/windows
       - name: Prepare versioned release assets
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p release
-          source_dmg="$(find release-artifacts/civ6-lan-bridge-macos-arm64-dmg -type f -name '*.dmg' -print -quit)"
+          source_dmg="$(find release-artifacts/macos -type f -name '*.dmg' -print -quit)"
+          source_exe="$(find release-artifacts/windows -type f -name '*.exe' ! -name '*uninstall*' -print -quit)"
           test -n "$source_dmg"
+          test -n "$source_exe"
           cp "$source_dmg" release/civ6-lan-bridge-macos-arm64.dmg
-          shasum -a 256 release/*.dmg > release/SHA256SUMS
+          cp "$source_exe" release/civ6-lan-bridge-windows-x64-setup.exe
+          shasum -a 256 release/*.dmg release/*.exe > release/SHA256SUMS
           cat > release/RELEASE_NOTES.md <<EOF
           ## Civ6 LAN Bridge ${GITHUB_REF_NAME}
 
-          macOS unsigned candidate packages built from commit ${GITHUB_SHA}.
+          Unsigned candidate packages built from commit ${GITHUB_SHA}.
 
           - Apple Silicon: \`civ6-lan-bridge-macos-arm64.dmg\`
+          - Windows x64: \`civ6-lan-bridge-windows-x64-setup.exe\`
           - Checksums: \`SHA256SUMS\`
 
           This is a test candidate. The Packet Tunnel/Civ VI data path and real
-          Civ VI room discovery still require validation on physical Macs.
+          Civ VI room discovery still require validation on physical devices.
           EOF
       - name: Publish GitHub Release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release/*.dmg release/SHA256SUMS \
+            gh release upload "$GITHUB_REF_NAME" release/*.dmg release/*.exe release/SHA256SUMS \
               --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release/*.dmg release/SHA256SUMS \
+            gh release create "$GITHUB_REF_NAME" release/*.dmg release/*.exe release/SHA256SUMS \
               --repo "$GITHUB_REPOSITORY" \
               --title "Civ6 LAN Bridge $GITHUB_REF_NAME" \
               --notes-file release/RELEASE_NOTES.md \
