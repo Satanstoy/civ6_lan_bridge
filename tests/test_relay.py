@@ -87,5 +87,22 @@ class RelayLoopbackTests(unittest.TestCase):
             time.sleep(0.01)
 
 
+class PlatformRoutingContractTests(unittest.TestCase):
+    def test_macos_route_is_split_and_keeps_safe_mtu(self):
+        provider = (pathlib.Path(__file__).parents[1] / "mac-client" / "PacketTunnel" / "Sources" / "PacketTunnelProvider.swift").read_text()
+        self.assertIn('destinationAddress: "255.255.255.255"', provider)
+        self.assertIn('destinationAddress: "10.240.0.0"', provider)
+        self.assertIn("settings.mtu = NSNumber(value: 1280)", provider)
+        self.assertNotIn('destinationAddress: "0.0.0.0"', provider)
+
+    def test_windows_contract_is_outbound_civ6_only(self):
+        contract = (pathlib.Path(__file__).parents[1] / "win-client" / "wfp" / "README.md").read_text()
+        self.assertIn("outbound", contract)
+        self.assertIn("transport layer", contract)
+        self.assertIn("62900-62999", contract)
+        self.assertIn("62056/UDP", contract)
+        self.assertIn("loop-prevention metadata", contract)
+
+
 if __name__ == "__main__":
     unittest.main()

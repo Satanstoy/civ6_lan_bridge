@@ -1291,6 +1291,52 @@ mod tests {
     }
 
     #[test]
+    fn room_peer_host_and_gameplay_limits_reject_excess_load_without_leaking_state() {
+        let config = RouterConfig {
+            max_rooms: 1,
+            max_peers_per_room: 2,
+            max_total_peers: 2,
+            max_hosts_per_room: 1,
+            max_gameplay_sessions: 1,
+            ..RouterConfig::default()
+        };
+        let mut router = RoomRouter::new(config);
+        let room = router.create_room(code("RMLMTA")).unwrap();
+        assert_eq!(
+            router.create_room(code("RMLMTB")),
+            Err(RouterError::RoomLimitReached)
+        );
+
+        let client = PeerId::new();
+        let host = PeerId::new();
+        router.join_room(room, client, ip("10.240.0.20")).unwrap();
+        router.join_room(room, host, ip("10.240.0.21")).unwrap();
+        let excess_peer = PeerId::new();
+        assert_eq!(
+            router.join_room(room, excess_peer, ip("10.240.0.22")),
+            Err(RouterError::RoomPeerLimitReached(room))
+        );
+        assert_eq!(router.stats().active_peers, 2);
+
+        let now = Instant::now();
+        let host_session = router.register_host(room, host, now).unwrap();
+        assert_eq!(
+            router.register_host(room, client, now),
+            Err(RouterError::HostLimitReached(room))
+        );
+        assert_eq!(router.stats().active_hosts, 1);
+
+        let gameplay = router.select_host(room, client, host_session, now).unwrap();
+        assert_eq!(
+            router.select_host(room, client, host_session, now),
+            Err(RouterError::GameplayLimitReached)
+        );
+        assert_eq!(router.stats().active_gameplay_sessions, 1);
+        assert_eq!(router.remove_gameplay_session(gameplay), Ok(()));
+        assert_eq!(router.stats().active_gameplay_sessions, 0);
+    }
+
+    #[test]
     fn discovery_retry_reuses_cached_request_without_creating_a_second_entry() {
         let (mut router, room_a, _, peer_a1, _, _) = setup_router();
         let now = Instant::now();

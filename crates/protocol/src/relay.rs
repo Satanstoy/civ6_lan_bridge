@@ -21,6 +21,8 @@ pub const MAX_RELAY_DATAGRAM_SIZE: usize = RELAY_HEADER_SIZE + MAX_CIV6_DATAGRAM
 /// The default payload ceiling that fits through the smallest supported
 /// tunnel without relying on IP fragmentation.
 pub const DEFAULT_SAFE_RELAY_PAYLOAD_SIZE: usize = 1_200;
+pub const WIREGUARD_UDP_PATH_ID: u8 = 1;
+pub const QUIC_DATAGRAM_PATH_ID: u8 = 2;
 
 const MAGIC: [u8; 4] = *b"C6LB";
 const DISCOVERY_REQUEST: u8 = 1;
@@ -93,6 +95,27 @@ pub struct RelayEnvelopeMeta {
     /// WireGuard UDP; QUIC DATAGRAM can use a later value without changing
     /// the room or Civ VI payload protocol.
     pub path_id: Option<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RelayTransportPath {
+    WireGuardUdp = WIREGUARD_UDP_PATH_ID,
+    QuicDatagram = QUIC_DATAGRAM_PATH_ID,
+}
+
+impl RelayTransportPath {
+    pub const fn id(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_id(value: u8) -> Option<Self> {
+        match value {
+            WIREGUARD_UDP_PATH_ID => Some(Self::WireGuardUdp),
+            QUIC_DATAGRAM_PATH_ID => Some(Self::QuicDatagram),
+            _ => None,
+        }
+    }
 }
 
 impl RelayEnvelopeMeta {
@@ -500,6 +523,20 @@ mod tests {
         assert_eq!(
             RelayEnvelope::decode(&legacy).unwrap(),
             RelayEnvelope::new(RelayEnvelopeMeta::default(), message)
+        );
+    }
+
+    #[test]
+    fn transport_path_ids_reserve_wireguard_and_quic_without_aliasing_them() {
+        assert_eq!(RelayTransportPath::WireGuardUdp.id(), WIREGUARD_UDP_PATH_ID);
+        assert_eq!(RelayTransportPath::QuicDatagram.id(), QUIC_DATAGRAM_PATH_ID);
+        assert_ne!(
+            RelayTransportPath::WireGuardUdp.id(),
+            RelayTransportPath::QuicDatagram.id()
+        );
+        assert_eq!(
+            RelayTransportPath::from_id(QUIC_DATAGRAM_PATH_ID),
+            Some(RelayTransportPath::QuicDatagram)
         );
     }
 }

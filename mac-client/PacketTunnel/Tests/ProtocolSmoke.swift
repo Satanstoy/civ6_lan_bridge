@@ -34,6 +34,23 @@ struct ProtocolSmoke {
             preconditionFailure("relay envelope decoded to the wrong message")
         }
 
+        let metadata = RelayEnvelopeMetadata(
+            sequence: 42,
+            connectionEpoch: 7,
+            sentAtMilliseconds: 1_234,
+            pathID: 2
+        )
+        let decodedV2 = try RelayEnvelope.decodeWithMetadata(
+            try envelope.encoded(metadata: metadata)
+        )
+        precondition(decodedV2.metadata == metadata)
+        guard case let .discoveryRequest(decodedV2ID, decodedV2Port, decodedV2Payload) = decodedV2.envelope else {
+            preconditionFailure("v2 relay envelope decoded to the wrong message")
+        }
+        precondition(decodedV2ID == requestID)
+        precondition(decodedV2Port == 62_900)
+        precondition(decodedV2Payload == original.payload)
+
         let hostSessionID = UUID()
         var clientRouter = Civ6PacketRouter(
             localAddress: 0x0a000002,

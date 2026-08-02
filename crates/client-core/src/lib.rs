@@ -15,8 +15,8 @@ use std::{
 use async_trait::async_trait;
 use civ6_lan_protocol::{
     relay::{
-        RelayCodecError, RelayEnvelope, RelayEnvelopeMeta, RelayMessage,
-        DEFAULT_SAFE_RELAY_PAYLOAD_SIZE, MAX_RELAY_DATAGRAM_SIZE,
+        RelayCodecError, RelayEnvelope, RelayEnvelopeMeta, RelayMessage, RelayTransportPath,
+        DEFAULT_SAFE_RELAY_PAYLOAD_SIZE, MAX_RELAY_DATAGRAM_SIZE, WIREGUARD_UDP_PATH_ID,
     },
     DiscoveryRequestId, GameplaySessionId, HostSessionId, PeerId, RoomCode, RoomId, VirtualIp,
 };
@@ -289,6 +289,12 @@ pub trait DatagramTransport: Send + Sync {
     async fn send(&self, packet: &[u8]) -> io::Result<()>;
     async fn receive(&self, buffer: &mut [u8]) -> io::Result<usize>;
     fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    /// The path identifier is part of the shared envelope, so a future QUIC
+    /// DATAGRAM implementation can use the same session and room protocol.
+    fn path_id(&self) -> Option<u8> {
+        Some(WIREGUARD_UDP_PATH_ID)
+    }
 }
 
 /// Default datagram transport: one connected UDP socket per relay session.
@@ -317,6 +323,10 @@ impl DatagramTransport for UdpDatagramTransport {
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
+
+    fn path_id(&self) -> Option<u8> {
+        Some(RelayTransportPath::WireGuardUdp.id())
+    }
 }
 
 pub struct RelayClient<T = UdpDatagramTransport> {
@@ -334,6 +344,10 @@ impl RelayClient<UdpDatagramTransport> {
 impl<T: DatagramTransport> RelayClient<T> {
     pub fn from_transport(transport: T) -> Self {
         Self { transport }
+    }
+
+    pub fn path_id(&self) -> Option<u8> {
+        self.transport.path_id()
     }
 
     pub async fn send(&self, message: &RelayMessage) -> Result<(), ClientError> {
@@ -448,7 +462,9 @@ impl Default for RelaySessionConfig {
             discovery_retry_interval: Duration::from_millis(250),
             discovery_retry_window: Duration::from_secs(5),
             safe_payload_size: DEFAULT_SAFE_RELAY_PAYLOAD_SIZE,
-            path_id: Some(1), // WireGuard UDP; QUIC DATAGRAM is reserved for a later path.
+            // Let the transport report its concrete path. A caller can set
+            // this explicitly while migrating or forcing a fallback.
+            path_id: None,
         }
     }
 }
@@ -529,12 +545,29 @@ impl<T: DatagramTransport> RelaySession<T> {
         self.snapshot.state = RelayConnectionState::Disconnected;
     }
 
+    /// Record a failed relay probe. Returns `true` when the session crosses
+    /// the degraded threshold and should start its reconnect backoff.
+    pub fn record_probe_failure(&mut self) -> bool {
+        self.snapshot.consecutive_probe_failures =
+            self.snapshot.consecutive_probe_failures.saturating_add(1);
+        if self.snapshot.consecutive_probe_failures >= self.config.degraded_after_failures {
+            self.snapshot.state = RelayConnectionState::Degraded;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn reconnect_delay_for_next_attempt(&self) -> Duration {
+        self.reconnect_delay()
+    }
+
     pub fn next_envelope_meta(&mut self) -> RelayEnvelopeMeta {
         self.next_sequence = self.next_sequence.saturating_add(1).max(1);
         RelayEnvelopeMeta::new(
             self.next_sequence,
             self.snapshot.connection_epoch,
-            self.config.path_id,
+            self.config.path_id.or_else(|| self.client.path_id()),
         )
     }
 
@@ -590,16 +623,11 @@ impl<T: DatagramTransport> RelaySession<T> {
                     tokio::time::sleep(self.config.probe_interval).await;
                 }
                 Err(_error) => {
-                    self.snapshot.consecutive_probe_failures =
-                        self.snapshot.consecutive_probe_failures.saturating_add(1);
-                    if self.snapshot.consecutive_probe_failures
-                        < self.config.degraded_after_failures
-                    {
+                    if !self.record_probe_failure() {
                         tokio::time::sleep(self.config.probe_interval).await;
                         continue;
                     }
 
-                    self.snapshot.state = RelayConnectionState::Degraded;
                     loop {
                         self.snapshot.state = RelayConnectionState::Reconnecting;
                         let delay = self.reconnect_delay();
@@ -814,8 +842,12 @@ struct CreateGameplayRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use civ6_lan_protocol::{Civ6UdpPort, GameplaySessionId};
-    use std::net::Ipv4Addr;
+    use civ6_lan_protocol::{relay::QUIC_DATAGRAM_PATH_ID, Civ6UdpPort, GameplaySessionId};
+    use std::{
+        collections::VecDeque,
+        net::Ipv4Addr,
+        sync::{Arc, Mutex},
+    };
 
     #[tokio::test]
     async fn relay_client_exchanges_a_versioned_message_over_udp() {
@@ -884,11 +916,72 @@ mod tests {
     fn relay_session_backoff_matches_the_reconnect_contract() {
         let client = RelayClient::from_transport(TestTransport);
         let mut session = RelaySession::new(client, 1);
-        assert_eq!(session.reconnect_delay(), Duration::from_millis(250));
+        assert_eq!(
+            session.reconnect_delay_for_next_attempt(),
+            Duration::from_millis(250)
+        );
         session.snapshot.reconnect_attempts = 4;
-        assert_eq!(session.reconnect_delay(), Duration::from_secs(4));
+        assert_eq!(
+            session.reconnect_delay_for_next_attempt(),
+            Duration::from_secs(4)
+        );
         session.snapshot.reconnect_attempts = 8;
-        assert_eq!(session.reconnect_delay(), Duration::from_secs(8));
+        assert_eq!(
+            session.reconnect_delay_for_next_attempt(),
+            Duration::from_secs(8)
+        );
+    }
+
+    #[test]
+    fn relay_session_can_label_a_quic_fallback_without_changing_the_envelope() {
+        let client = RelayClient::from_transport(TestTransport);
+        let mut session = RelaySession::with_config(
+            client,
+            1,
+            RelaySessionConfig {
+                path_id: Some(QUIC_DATAGRAM_PATH_ID),
+                ..RelaySessionConfig::default()
+            },
+        );
+        let meta = session.next_envelope_meta();
+        assert_eq!(meta.path_id, Some(QUIC_DATAGRAM_PATH_ID));
+        assert_eq!(
+            RelayTransportPath::from_id(meta.path_id.unwrap()),
+            Some(RelayTransportPath::QuicDatagram)
+        );
+    }
+
+    #[tokio::test]
+    async fn simulated_loss_delay_and_disconnect_recover_without_gameplay_replay() {
+        let controller = FaultController::default();
+        controller.set_delay(Duration::from_millis(2));
+        let client = RelayClient::from_transport(SimulatedTransport {
+            controller: controller.clone(),
+        });
+        let config = RelaySessionConfig {
+            probe_timeout: Duration::from_millis(12),
+            ..RelaySessionConfig::default()
+        };
+        let mut session = RelaySession::with_config(client, 1, config);
+        session.mark_authenticated(1);
+        session.mark_room_joined();
+
+        controller.drop_next(3);
+        for _ in 0..3 {
+            assert!(session.probe_once().await.is_err());
+            session.record_probe_failure();
+        }
+        assert_eq!(session.snapshot().state, RelayConnectionState::Degraded);
+        assert_eq!(session.snapshot().consecutive_probe_failures, 3);
+
+        controller.set_offline(true);
+        assert!(session.probe_once().await.is_err());
+        controller.set_offline(false);
+        assert!(session.probe_once().await.unwrap() >= Duration::from_millis(2));
+        assert_eq!(session.snapshot().consecutive_probe_failures, 0);
+
+        let sent = controller.sent_packets();
+        assert_eq!(sent, 5);
     }
 
     struct TestTransport;
@@ -901,6 +994,105 @@ mod tests {
 
         async fn receive(&self, _buffer: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::new(io::ErrorKind::TimedOut, "test transport"))
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok("127.0.0.1:0".parse().unwrap())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FaultController {
+        state: Arc<Mutex<FaultState>>,
+    }
+
+    #[derive(Default)]
+    struct FaultState {
+        drop_remaining: usize,
+        offline: bool,
+        delay: Duration,
+        sent_packets: usize,
+        received_packets: VecDeque<Vec<u8>>,
+    }
+
+    impl FaultController {
+        fn drop_next(&self, count: usize) {
+            self.state.lock().unwrap().drop_remaining = count;
+        }
+
+        fn set_offline(&self, offline: bool) {
+            self.state.lock().unwrap().offline = offline;
+        }
+
+        fn set_delay(&self, delay: Duration) {
+            self.state.lock().unwrap().delay = delay;
+        }
+
+        fn sent_packets(&self) -> usize {
+            self.state.lock().unwrap().sent_packets
+        }
+    }
+
+    struct SimulatedTransport {
+        controller: FaultController,
+    }
+
+    #[async_trait]
+    impl DatagramTransport for SimulatedTransport {
+        async fn send(&self, packet: &[u8]) -> io::Result<()> {
+            let envelope = RelayEnvelope::decode(packet)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            let (delay, should_drop, offline) = {
+                let mut state = self.controller.state.lock().unwrap();
+                state.sent_packets += 1;
+                let should_drop = state.drop_remaining > 0;
+                if should_drop {
+                    state.drop_remaining -= 1;
+                }
+                (state.delay, should_drop, state.offline)
+            };
+            if offline {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "simulated network disconnect",
+                ));
+            }
+            if should_drop {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+            if let RelayMessage::RelayProbe { request_id } = envelope.message {
+                let ack =
+                    RelayEnvelope::new(envelope.meta, RelayMessage::RelayProbeAck { request_id })
+                        .encode()
+                        .map_err(|error| {
+                            io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                        })?;
+                self.controller
+                    .state
+                    .lock()
+                    .unwrap()
+                    .received_packets
+                    .push_back(ack);
+            }
+            Ok(())
+        }
+
+        async fn receive(&self, buffer: &mut [u8]) -> io::Result<usize> {
+            loop {
+                if let Some(packet) = self
+                    .controller
+                    .state
+                    .lock()
+                    .unwrap()
+                    .received_packets
+                    .pop_front()
+                {
+                    buffer[..packet.len()].copy_from_slice(&packet);
+                    return Ok(packet.len());
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
 
         fn local_addr(&self) -> io::Result<SocketAddr> {

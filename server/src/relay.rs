@@ -472,6 +472,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn udp_rate_limit_is_applied_before_relay_dispatch() {
+        let (mut state, _, _, _, _) = setup().await;
+        state.udp_rate_limiter =
+            crate::state::FixedWindowRateLimiter::new(2, Duration::from_secs(60));
+        let dispatcher = RelayDispatcher::new(state, DEFAULT_RELAY_PORT);
+        let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 240, 0, 2)), DEFAULT_RELAY_PORT);
+
+        for _ in 0..2 {
+            dispatcher
+                .handle_datagram(
+                    source,
+                    &RelayMessage::RelayProbe {
+                        request_id: DiscoveryRequestId::new(),
+                    }
+                    .encode()
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let error = dispatcher
+            .handle_datagram(
+                source,
+                &RelayMessage::RelayProbe {
+                    request_id: DiscoveryRequestId::new(),
+                }
+                .encode()
+                .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RelayError::RateLimited));
+    }
+
+    #[tokio::test]
     async fn client_core_probe_exchanges_with_the_live_server_socket() {
         let state = AppState::new("test-bearer-token");
         {

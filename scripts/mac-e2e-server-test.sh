@@ -83,7 +83,7 @@ echo "Starting civ6-lan-server from $ROOT_DIR"
 echo "Control endpoint: $CONTROL_URL"
 echo "Relay endpoint: udp://$RELAY_ADDR"
 echo "UDP relay port: $RELAY_PORT"
-echo "Protocol version: 1"
+echo "Protocol version: 2 (v1 decode compatibility retained)"
 echo "Build commit: $CIV6_BUILD_COMMIT"
 
 cargo run --quiet --manifest-path "$ROOT_DIR/server/Cargo.toml" --bin civ6-lan-server \

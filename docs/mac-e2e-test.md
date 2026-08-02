@@ -41,7 +41,7 @@ scripts/mac-e2e-server-test.sh
 export CIV6_TEST_MANIFEST=/tmp/civ6-lan-bridge-mac-e2e.XXXXXX/session-manifest.json
 ```
 
-在 macOS Tauri 客户端中点击“读取 macOS 测试 manifest”会调用 `load_test_manifest`，填入控制 API、Bearer token、relay 地址、room code、peer ID 和本机虚拟地址。该命令只接受本地文件，不会把 token 写入 Git；测试完成后应删除原始 manifest。当前仓库的 Packet Tunnel provider 仍有真实 WireGuard send/inject TODO，因此该按钮和 relay probe 是诊断入口，不是 Civ VI 已联机的承诺。
+在 macOS Tauri 客户端中点击“读取 macOS 测试 manifest”会调用 `load_test_manifest`，填入控制 API、Bearer token、relay 地址、room code、peer ID 和本机虚拟地址。该命令只接受本地文件，不会把 token 写入 Git；测试完成后应删除原始 manifest。当前仓库的 Packet Tunnel provider 仍有真实 WireGuard send/inject TODO，因此该按钮和 relay probe 是诊断入口，不是 Civ VI 已联机的承诺。协议冒烟测试同时覆盖 legacy v1 解码与带 `sequence`、`connection_epoch`、`sent_at_ms`、`path_id` 的 v2 envelope。
 
 如果 Mac 代理要把结果交回 server runner，可设置：
 

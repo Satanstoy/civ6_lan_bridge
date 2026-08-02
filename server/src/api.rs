@@ -727,6 +727,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_api_rate_limit_returns_429_after_the_window_budget() {
+        let app = build_router(AppState::new("test-token"));
+        for request_number in 0..=120 {
+            let response = app
+                .clone()
+                .oneshot(authorized_request("GET", "/v1/test/metrics", "{}"))
+                .await
+                .unwrap();
+            if request_number < 120 {
+                assert_eq!(response.status(), StatusCode::OK);
+            } else {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn room_delete_requires_an_empty_room() {
         let app = build_router(AppState::new("test-token"));
         let created = app
