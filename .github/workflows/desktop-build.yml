@@ -86,11 +86,15 @@ jobs:
           if ($install.ExitCode -ne 0) {
             throw "NSIS install failed with exit code $($install.ExitCode)"
           }
-          $installedExe = Join-Path $installRoot "civ6-lan-bridge-windows.exe"
-          if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
-            throw "Installed client executable was not found: $installedExe"
+          $installedExe = Get-ChildItem -LiteralPath $installRoot -File -Filter "*.exe" |
+            Where-Object { $_.Name -notmatch "^(unins|uninstall|WebView2Loader)" } |
+            Select-Object -First 1
+          if ($null -eq $installedExe) {
+            Get-ChildItem -LiteralPath $installRoot -Recurse -Force | Format-Table -AutoSize | Out-String | Write-Host
+            throw "Installed client executable was not found below $installRoot"
           }
-          $rules = @(Get-NetFirewallRule -DisplayName "Civ6 LAN Bridge*" -ErrorAction SilentlyContinue)
+          $rules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "Civ6 LAN Bridge*" })
           if ($rules.Count -lt 2) {
             throw "Expected relay firewall rules were not installed"
           }
@@ -105,7 +109,8 @@ jobs:
           if ($uninstall.ExitCode -ne 0) {
             throw "NSIS uninstall failed with exit code $($uninstall.ExitCode)"
           }
-          $remainingRules = @(Get-NetFirewallRule -DisplayName "Civ6 LAN Bridge*" -ErrorAction SilentlyContinue)
+          $remainingRules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "Civ6 LAN Bridge*" })
           if ($remainingRules.Count -ne 0) {
             throw "Firewall rules remained after uninstall"
           }

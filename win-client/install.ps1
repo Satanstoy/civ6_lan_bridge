@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ClientExe = "$PSScriptRoot\Civ6 LAN Bridge.exe",
+    [string]$InstallRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$ClientExe,
     [string]$Civ6Exe,
     [switch]$Uninstall
 )
@@ -30,6 +31,12 @@ if ($Uninstall) {
 }
 
 Remove-BridgeRules
+
+if (-not $ClientExe) {
+    $ClientExe = Get-ChildItem -LiteralPath $InstallRoot -File -Filter "*.exe" |
+        Where-Object { $_.Name -notmatch "^(unins|uninstall|WebView2Loader)" } |
+        Select-Object -First 1 -ExpandProperty FullName
+}
 
 if (-not (Test-Path -LiteralPath $ClientExe -PathType Leaf)) {
     throw "Client executable was not found: $ClientExe"
