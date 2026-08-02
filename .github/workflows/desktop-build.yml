@@ -57,24 +57,71 @@ jobs:
         run: npm ci
       - name: Build unsigned candidate NSIS installer
         working-directory: win-client
-        run: npm run tauri build -- --ci --no-sign
+        run: npm run tauri build -- --ci --no-sign --bundles nsis
+      - name: Validate Windows installer candidate
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem win-client/src-tauri/target/release/bundle/nsis/*.exe |
+            Where-Object { $_.Name -notmatch 'uninstall' } |
+            Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "NSIS installer was not produced"
+          }
+          if ($installer.Length -lt 1000000) {
+            throw "Windows installer is unexpectedly small: $($installer.Length) bytes"
+          }
+          Write-Host "Installer: $($installer.FullName) ($($installer.Length) bytes)"
+      - name: Smoke-test Windows install, firewall hooks, and uninstall
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem win-client/src-tauri/target/release/bundle/nsis/*.exe |
+            Where-Object { $_.Name -notmatch 'uninstall' } |
+            Select-Object -First 1
+          $installRoot = Join-Path $env:RUNNER_TEMP "civ6-lan-bridge-install"
+          if (Test-Path $installRoot) {
+            Remove-Item -LiteralPath $installRoot -Recurse -Force
+          }
+          $install = Start-Process -FilePath $installer.FullName `
+            -ArgumentList @('/S', "/D=$installRoot") -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "NSIS install failed with exit code $($install.ExitCode)"
+          }
+          $installedExe = Join-Path $installRoot "civ6-lan-bridge-windows.exe"
+          if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+            throw "Installed client executable was not found: $installedExe"
+          }
+          $rules = @(Get-NetFirewallRule -DisplayName "Civ6 LAN Bridge*" -ErrorAction SilentlyContinue)
+          if ($rules.Count -lt 2) {
+            throw "Expected relay firewall rules were not installed"
+          }
+          $uninstaller = Get-ChildItem -LiteralPath $installRoot -File |
+            Where-Object { $_.Name -match 'unins|uninstall' } |
+            Select-Object -First 1
+          if ($null -eq $uninstaller) {
+            throw "NSIS uninstaller was not found"
+          }
+          $uninstall = Start-Process -FilePath $uninstaller.FullName `
+            -ArgumentList @('/S') -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+            throw "NSIS uninstall failed with exit code $($uninstall.ExitCode)"
+          }
+          $remainingRules = @(Get-NetFirewallRule -DisplayName "Civ6 LAN Bridge*" -ErrorAction SilentlyContinue)
+          if ($remainingRules.Count -ne 0) {
+            throw "Firewall rules remained after uninstall"
+          }
+          Write-Host "Windows NSIS install/uninstall smoke test passed"
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: civ6-lan-bridge-windows-exe
           path: win-client/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
-      - name: Validate Windows installer candidate
-        shell: pwsh
-        run: |
-          $installer = Get-ChildItem win-client/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
-          if ($installer.Length -lt 1000000) {
-            throw "Windows installer is unexpectedly small: $($installer.Length) bytes"
-          }
       - name: Hash Windows installer
         shell: pwsh
         run: |
-          $installer = Get-ChildItem win-client/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          $installer = Get-ChildItem win-client/src-tauri/target/release/bundle/nsis/*.exe |
+            Where-Object { $_.Name -notmatch 'uninstall' } |
+            Select-Object -First 1
           Get-FileHash $installer.FullName -Algorithm SHA256 | Format-List
 
   macos-dmg:
@@ -192,6 +239,28 @@ jobs:
           APP_PATH="$(find mac-client/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$APP_PATH"
           test -d "$APP_PATH/Contents/PlugIns/PacketTunnel.appex"
+          test -n "$(find "$APP_PATH/Contents/MacOS" -type f -perm -111 -print -quit)"
+      - name: Verify and mount macOS DMG candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          DMG_PATH="$(find mac-client/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+          MOUNT_POINT="$(mktemp -d "$RUNNER_TEMP/civ6-lan-bridge-dmg.XXXXXX")"
+          DEVICE="$(hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" | awk '/Apple_HFS|APFS/ { print $1; exit }')"
+          cleanup() {
+            if [ -n "${DEVICE:-}" ]; then
+              hdiutil detach "$DEVICE" -quiet || true
+            fi
+            rm -rf "$MOUNT_POINT"
+          }
+          trap cleanup EXIT
+          APP_ON_DMG="$(find "$MOUNT_POINT" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_ON_DMG"
+          test -d "$APP_ON_DMG/Contents/PlugIns/PacketTunnel.appex"
+          test -n "$(find "$APP_ON_DMG/Contents/MacOS" -type f -perm -111 -print -quit)"
+          echo "macOS DMG mounted and contains the app plus PacketTunnel.appex"
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
