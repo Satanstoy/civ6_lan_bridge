@@ -37,6 +37,7 @@ type Room = {
 };
 
 type View = "auth" | "lobby" | "room";
+type Reachability = "checking" | "healthy" | "offline";
 
 const RECENT_ROOMS_KEY = "civ6-lan-bridge.recent-rooms";
 const USER_KEY = "civ6-lan-bridge.user";
@@ -53,6 +54,26 @@ function escapeHtml(value: string): string {
         '"': "&quot;",
       })[character] ?? character,
   );
+}
+
+function describeError(error: unknown): string {
+  const message = String(error);
+  if (/invalid relay address/i.test(message)) {
+    return "中继服务器配置无效，请联系管理员检查服务器地址和端口。";
+  }
+  if (/invalid control endpoint/i.test(message)) {
+    return "服务端地址配置无效，请联系管理员检查控制面 URL。";
+  }
+  if (/invalid relay port/i.test(message)) {
+    return "中继端口配置无效，请联系管理员检查服务器端口。";
+  }
+  if (/401|unauthorized|valid bearer token/i.test(message)) {
+    return "服务端鉴权未配置或已失效，请联系管理员更新客户端服务配置。";
+  }
+  if (/connection refused|error sending request|failed to connect|timed out/i.test(message)) {
+    return "暂时无法连接服务，请检查网络后重试。";
+  }
+  return message;
 }
 
 function readRecentRooms(): string[] {
@@ -103,6 +124,10 @@ function render({ platform, invoke }: BridgeUiOptions): void {
   let userName = localStorage.getItem(USER_KEY) ?? "";
   let currentRoom: Room | null = null;
   let roomPing: number | null = null;
+  let roomReachability: Reachability = "checking";
+  let roomPingTimer: number | undefined;
+  let serviceReachability: Reachability = "checking";
+  let serviceCheckInFlight = false;
   let notice: { type: "success" | "error"; text: string } | null = null;
   let busy = false;
 
@@ -120,6 +145,27 @@ function render({ platform, invoke }: BridgeUiOptions): void {
     document.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
       button.disabled = value;
     });
+  };
+
+  const stopRoomPing = (): void => {
+    if (roomPingTimer !== undefined) {
+      window.clearInterval(roomPingTimer);
+      roomPingTimer = undefined;
+    }
+  };
+
+  const refreshServiceStatus = async (): Promise<void> => {
+    if (serviceCheckInFlight || view === "auth") return;
+    serviceCheckInFlight = true;
+    try {
+      await invoke("health_live", { settings: settings() });
+      serviceReachability = "healthy";
+    } catch {
+      serviceReachability = "offline";
+    } finally {
+      serviceCheckInFlight = false;
+      if (view === "lobby") show();
+    }
   };
 
   const show = (): void => {
@@ -186,6 +232,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
 
   const renderLobby = (platformLabel: string): string => {
     const recentRooms = readRecentRooms();
+    const serviceLabel = serviceReachability === "healthy" ? "服务在线" : serviceReachability === "offline" ? "服务不可用" : "检查服务";
     return `
       <main class="page-content">
         <section class="page-heading">
@@ -194,7 +241,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
             <h1>准备好开始了吗，${escapeHtml(userName)}？</h1>
             <p class="muted">创建一个房间，或者使用朋友分享的房间码加入。</p>
           </div>
-          <div class="connection-state"><span class="online-dot"></span>服务在线</div>
+          <div class="connection-state ${serviceReachability}"><span class="online-dot"></span>${serviceLabel}</div>
         </section>
         <section class="room-actions">
           <article class="action-card create-card">
@@ -220,7 +267,9 @@ function render({ platform, invoke }: BridgeUiOptions): void {
 
   const renderRoom = (platformLabel: string): string => {
     if (!currentRoom) return "";
-    const pingText = roomPing === null ? "检测中" : `${roomPing} ms`;
+    const pingText = roomReachability === "checking" ? "检测中" : roomReachability === "offline" ? "不可用" : `${roomPing ?? 0} ms`;
+    const roomStatus = roomReachability === "healthy" ? "房间已连接" : roomReachability === "offline" ? "连接异常" : "正在连接";
+    const roomStatusHelp = roomReachability === "healthy" ? "服务器正在维持这条专用链路" : roomReachability === "offline" ? "正在等待网络恢复，客户端会继续尝试" : "正在探测中继服务器";
     return `
       <main class="page-content room-page">
         <button id="back-lobby" class="back-button" type="button">${icon("back")}返回房间列表</button>
@@ -229,14 +278,14 @@ function render({ platform, invoke }: BridgeUiOptions): void {
           <button id="copy-room" class="button button-quiet" type="button">${icon("copy")}复制房间码</button>
         </section>
         <section class="room-status-card">
-          <div class="room-status-main"><span class="status-pulse"></span><div><strong>房间已连接</strong><span>服务器正在维持这条专用链路</span></div></div>
+          <div class="room-status-main"><span class="status-pulse ${roomReachability}"></span><div><strong>${roomStatus}</strong><span>${roomStatusHelp}</span></div></div>
           <div class="room-code-mini"><small>房间码</small><strong>${escapeHtml(currentRoom.code)}</strong></div>
         </section>
         <section class="room-grid">
           <article class="panel members-panel"><div class="panel-heading"><div><h2>房间成员</h2><p>${currentRoom.memberCount} 位成员</p></div><span class="member-count">${currentRoom.memberCount}</span></div><div class="member-list">
             ${currentRoom.isOwner ? `<div class="member-row"><span class="avatar owner">${escapeHtml(userName.slice(0, 1).toUpperCase())}</span><span class="member-details"><strong>${escapeHtml(userName)} <em>你</em></strong><small>房间房主</small></span><span class="host-badge">房主</span></div>` : `<div class="member-row"><span class="avatar">${escapeHtml(userName.slice(0, 1).toUpperCase())}</span><span class="member-details"><strong>${escapeHtml(userName)} <em>你</em></strong><small>已连接</small></span><span class="member-latency">—</span></div><div class="member-row waiting-row"><span class="avatar pending">?</span><span class="member-details"><strong>房间房主</strong><small>等待服务器同步</small></span><span class="member-latency">—</span></div>`}
           </div></article>
-          <article class="panel latency-panel"><div class="panel-heading"><div><h2>连接质量</h2><p>你到中继服务器的延迟</p></div>${icon("signal")}</div><div class="latency-value"><strong>${pingText}</strong><span>Relay server</span></div><div class="latency-bar"><span style="width:${roomPing === null ? 35 : Math.min(95, Math.max(15, 100 - roomPing / 3))}%"></span></div><p class="latency-help">延迟只反映你到服务器的路径，不代表朋友之间的直连延迟。</p></article>
+          <article class="panel latency-panel"><div class="panel-heading"><div><h2>连接质量</h2><p>你到中继服务器的延迟</p></div>${icon("signal")}</div><div class="latency-value"><strong>${pingText}</strong><span>Relay server</span></div><div class="latency-bar"><span style="width:${roomReachability === "offline" ? 8 : roomPing === null ? 35 : Math.min(95, Math.max(15, 100 - roomPing / 3))}%"></span></div><p class="latency-help">延迟只反映你到服务器的路径，不代表朋友之间的直连延迟。</p></article>
         </section>
         <div class="room-bottom"><span class="secure-label"><span class="lock-dot"></span>专用连接已启用</span><button id="leave-room" class="link-button danger" type="button">离开房间</button></div>
         ${notice ? `<div class="notice ${notice.type}">${escapeHtml(notice.text)}</div>` : ""}
@@ -246,22 +295,27 @@ function render({ platform, invoke }: BridgeUiOptions): void {
 
   const refreshRoomPing = async (): Promise<void> => {
     if (!currentRoom) return;
+    const roomCode = currentRoom.code;
     try {
       const started = performance.now();
       await invoke("relay_probe", { settings: settings(), localBind: "0.0.0.0:0" });
+      if (!currentRoom || currentRoom.code !== roomCode) return;
       roomPing = Math.max(1, Math.round(performance.now() - started));
+      roomReachability = "healthy";
     } catch {
+      if (!currentRoom || currentRoom.code !== roomCode) return;
       roomPing = null;
+      roomReachability = "offline";
     }
     show();
   };
 
-  const joinRoom = async (code: string, owner: boolean): Promise<void> => {
+  const joinRoom = async (code: string, owner: boolean): Promise<boolean> => {
     const normalized = code.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (normalized.length < 6) {
       setNotice("error", "请输入完整的 6 位房间码。");
       show();
-      return;
+      return false;
     }
     setBusy(true);
     show();
@@ -274,12 +328,24 @@ function render({ platform, invoke }: BridgeUiOptions): void {
       saveRecentRoom(normalized);
       view = "room";
       roomPing = null;
+      roomReachability = "checking";
       setNotice("success", "房间已准备好。");
       show();
       void refreshRoomPing();
+      stopRoomPing();
+      roomPingTimer = window.setInterval(() => void refreshRoomPing(), 2000);
+      return true;
     } catch (error) {
-      setNotice("error", `加入房间失败：${String(error)}`);
+      if (owner) {
+        try {
+          await invoke("delete_room", { settings: settings(), roomCode: normalized });
+        } catch {
+          // The room may already have been cleaned up by the server.
+        }
+      }
+      setNotice("error", `加入房间失败：${describeError(error)}`);
       show();
+      return false;
     } finally {
       setBusy(false);
       show();
@@ -306,8 +372,10 @@ function render({ platform, invoke }: BridgeUiOptions): void {
       view = "lobby";
       notice = null;
       show();
+      void refreshServiceStatus();
     });
     document.getElementById("logout")?.addEventListener("click", () => {
+      stopRoomPing();
       localStorage.removeItem(USER_KEY);
       currentRoom = null;
       view = "auth";
@@ -320,7 +388,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
         const room = await invoke<RoomResponse>("create_room", { settings: settings() });
         await joinRoom(room.room_code, true);
       } catch (error) {
-        setNotice("error", `创建房间失败：${String(error)}`);
+        setNotice("error", `创建房间失败：${describeError(error)}`);
         setBusy(false);
         show();
       }
@@ -334,6 +402,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
       });
     });
     document.getElementById("back-lobby")?.addEventListener("click", () => {
+      stopRoomPing();
       view = "lobby";
       currentRoom = null;
       roomPing = null;
@@ -341,6 +410,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
       show();
     });
     document.getElementById("leave-room")?.addEventListener("click", () => {
+      stopRoomPing();
       view = "lobby";
       currentRoom = null;
       roomPing = null;
@@ -360,6 +430,7 @@ function render({ platform, invoke }: BridgeUiOptions): void {
   };
 
   show();
+  if (view === "lobby") void refreshServiceStatus();
 }
 
 export function mountBridgeApp(options: BridgeUiOptions): void {

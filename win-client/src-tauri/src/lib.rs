@@ -17,18 +17,29 @@ pub struct ClientSettings {
 
 impl ClientSettings {
     fn config(&self) -> Result<ClientConfig, String> {
+        let control_url = self.control_url.trim();
+        if control_url.is_empty()
+            || !(control_url.starts_with("http://") || control_url.starts_with("https://"))
+        {
+            return Err("invalid control endpoint: expected an http:// or https:// URL".to_owned());
+        }
+        if self.relay_port == 0 {
+            return Err("invalid relay port: port must be between 1 and 65535".to_owned());
+        }
         let relay_server = self
             .relay_server
+            .trim()
             .parse::<SocketAddr>()
             .or_else(|_| {
                 self.relay_server
+                    .trim()
                     .parse::<IpAddr>()
                     .map(|ip| SocketAddr::new(ip, self.relay_port))
             })
             .map_err(|error| format!("invalid relay address: {error}"))?;
 
         Ok(ClientConfig {
-            control_url: self.control_url.clone(),
+            control_url: control_url.to_owned(),
             bearer_token: self.bearer_token.clone(),
             relay_server,
             relay_port: self.relay_port,
@@ -55,6 +66,17 @@ async fn health_live(settings: ClientSettings) -> Result<civ6_lan_client_core::H
 async fn create_room(settings: ClientSettings) -> Result<civ6_lan_client_core::RoomResponse, String> {
     ControlClient::new(settings.config()?)
         .create_room(None)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn delete_room(settings: ClientSettings, room_code: String) -> Result<(), String> {
+    let room_code = room_code
+        .parse::<RoomCode>()
+        .map_err(|error| format!("invalid room code: {error}"))?;
+    ControlClient::new(settings.config()?)
+        .delete_room(&room_code)
         .await
         .map_err(|error| error.to_string())
 }
@@ -142,6 +164,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health_live,
             create_room,
+            delete_room,
             join_room,
             register_host,
             create_gameplay_session,
