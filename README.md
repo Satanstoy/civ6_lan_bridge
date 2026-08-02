@@ -103,7 +103,23 @@ sudo systemctl restart civ6-relay
 
 `win-client/` 和 `mac-client/` 使用各自的 Tauri 原生壳，但 UI 入口、样式和 TypeScript 编译配置来自 `clients/ui/`。因此 UI 修改只维护一份；平台差异只能进入 Tauri Rust 命令、Windows WFP 或 macOS Network Extension。
 
-本仓库的 `.github/workflows/desktop-build.yml` 在 Windows runner 生成 NSIS `.exe`，在 Apple Silicon macOS runner 生成 ARM64 DMG，并把未签名 Packet Tunnel `.appex` 嵌入候选 App 的 `Contents/PlugIns`。普通分支构建只上传 CI artifact；推送 `v*` tag 时，release job 会把 Apple Silicon DMG 和 `SHA256SUMS` 发布到 GitHub Release，避免把临时 Azure Blob artifact URL 当成用户下载地址。当前 Linux 环境不能生成真实 Windows/macOS 制品；在 WFP/Packet Tunnel 数据转发和签名完成前，这些仍是候选包，不代表 Civ VI 端到端联机已验收。
+本仓库的 `.github/workflows/desktop-build.yml` 在 Windows runner 生成 NSIS `.exe`，在 Apple Silicon macOS runner 生成 ARM64 DMG，并把 Packet Tunnel `.appex` 嵌入 App 的 `Contents/PlugIns`。普通分支构建只上传未签名 CI 验证 artifact；推送 `v*` tag 时，macOS job 必须先通过 Developer ID、Network Extension provisioning profile、Hardened Runtime、notarization 和 staple 检查，release job 才会发布 DMG。这样不会再把未签名 DMG 当作用户安装包。
+
+### macOS release 签名配置
+
+macOS tag release 需要在 GitHub 仓库的 `Settings → Secrets and variables → Actions` 中配置以下 secrets。不要把证书、密码或 provisioning profile 提交到仓库或发送到聊天中：
+
+- `APPLE_CERTIFICATE`：从 Mac Keychain 导出的 Developer ID Application `.p12` 的单行 base64 内容。
+- `APPLE_CERTIFICATE_PASSWORD`：`.p12` 导出密码。
+- `KEYCHAIN_PASSWORD`：Actions 临时 keychain 密码。
+- `APPLE_SIGNING_IDENTITY`：完整证书名，例如 `Developer ID Application: Your Name (TEAMID)`。
+- `APPLE_ID`：用于 notarization 的 Apple ID 邮箱。
+- `APPLE_PASSWORD`：Apple ID app-specific password，不是账户登录密码。
+- `APPLE_TEAM_ID`：Apple Developer Team ID。
+- `APPLE_APP_PROVISIONING_PROFILE`：`com.civ6lanbridge.macos` 对应 provisioning profile 的单行 base64 内容。
+- `APPLE_PACKET_TUNNEL_PROVISIONING_PROFILE`：`com.civ6lanbridge.macos.packet-tunnel` 对应、包含 Packet Tunnel Provider capability 的 provisioning profile 的单行 base64 内容。
+
+其中 app ID、Packet Tunnel extension ID、证书和 profile 必须属于同一个 Apple Developer Team。配置完成后，推送新的 `v*` tag；如果任一 secret 缺失、profile 的 bundle ID 不匹配、codesign 校验失败或 notarization/staple 失败，workflow 会停止且不会创建 release。
 
 ## Windows 客户端流程（旧版手工验证）
 

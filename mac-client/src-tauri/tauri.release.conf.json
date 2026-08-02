@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "targets": ["app"],
+    "macOS": {
+      "files": {
+        "PlugIns/PacketTunnel.appex": "../PacketTunnel/build/PacketTunnel.appex",
+        "embedded.provisionprofile": "../signing/app.provisionprofile"
+      }
+    }
+  }
+}

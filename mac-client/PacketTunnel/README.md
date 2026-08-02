@@ -26,6 +26,8 @@ must still embed the Rust transport sidecar, decode IPv4/UDP, and pass only UDP
 not become a generic proxy or silently forward all system traffic.
 
 Release prerequisites are the Network Extension entitlement, Developer ID
-signing, hardened runtime, notarization and staple. Test on Apple Silicon
+signing, hardened runtime, notarization and staple. The repository's tag
+workflow fails closed until the Developer ID certificate and both provisioning
+profiles are configured as GitHub Actions secrets. Test on Apple Silicon
 with Mac↔Windows and Mac↔Mac games, including the 2K age-verification
 precondition and repeated long games.

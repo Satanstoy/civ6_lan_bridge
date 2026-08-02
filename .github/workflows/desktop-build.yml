@@ -191,20 +191,80 @@ jobs:
                   )
           print("macOS app icon is 1024x1024 8-bit RGBA")
           PY
-      - name: Build unsigned Packet Tunnel extension target
+      - name: Require macOS release signing configuration
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PROVISIONING_PROFILE: ${{ secrets.APPLE_APP_PROVISIONING_PROFILE }}
+          APPLE_PACKET_TUNNEL_PROVISIONING_PROFILE: ${{ secrets.APPLE_PACKET_TUNNEL_PROVISIONING_PROFILE }}
+        run: |
+          required=(
+            APPLE_CERTIFICATE
+            APPLE_CERTIFICATE_PASSWORD
+            KEYCHAIN_PASSWORD
+            APPLE_SIGNING_IDENTITY
+            APPLE_ID
+            APPLE_PASSWORD
+            APPLE_TEAM_ID
+            APPLE_APP_PROVISIONING_PROFILE
+            APPLE_PACKET_TUNNEL_PROVISIONING_PROFILE
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing GitHub Actions secret: $name" >&2
+              exit 1
+            fi
+          done
+          echo "All required macOS signing and notarization secrets are present"
+      - name: Prepare macOS signing keychain and provisioning profiles
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PROVISIONING_PROFILE: ${{ secrets.APPLE_APP_PROVISIONING_PROFILE }}
+          APPLE_PACKET_TUNNEL_PROVISIONING_PROFILE: ${{ secrets.APPLE_PACKET_TUNNEL_PROVISIONING_PROFILE }}
+        run: mac-client/scripts/prepare-macos-signing.sh
+      - name: Build Packet Tunnel extension target
         id: build-packet-tunnel
         continue-on-error: true
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -o pipefail
-          xcodebuild -verbose \
-            -project mac-client/PacketTunnel/PacketTunnel.xcodeproj \
-            -scheme PacketTunnel \
-            -configuration Release \
-            -destination generic/platform=macOS \
-            -derivedDataPath "mac-client/PacketTunnel/.build/${{ matrix.arch }}" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            build 2>&1 | tee "$RUNNER_TEMP/packet-tunnel-xcodebuild.log"
+          xcodebuild_args=(
+            -verbose
+            -project mac-client/PacketTunnel/PacketTunnel.xcodeproj
+            -scheme PacketTunnel
+            -configuration Release
+            -destination generic/platform=macOS
+            -derivedDataPath "mac-client/PacketTunnel/.build/${{ matrix.arch }}"
+          )
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            xcodebuild_args+=(
+              CODE_SIGNING_ALLOWED=YES
+              CODE_SIGNING_REQUIRED=YES
+              CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY"
+              DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
+              CODE_SIGN_STYLE=Manual
+              PROVISIONING_PROFILE_SPECIFIER="$MACOS_PACKET_TUNNEL_PROFILE_UUID"
+            )
+          else
+            xcodebuild_args+=(
+              CODE_SIGNING_ALLOWED=NO
+              CODE_SIGNING_REQUIRED=NO
+            )
+          fi
+          xcodebuild "${xcodebuild_args[@]}" build 2>&1 | tee "$RUNNER_TEMP/packet-tunnel-xcodebuild.log"
       - name: Upload Packet Tunnel build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -222,7 +282,7 @@ jobs:
       - name: Fail if Packet Tunnel build failed
         if: steps.build-packet-tunnel.outcome == 'failure'
         run: exit 1
-      - name: Upload unsigned Packet Tunnel validation artifact
+      - name: Upload Packet Tunnel validation artifact
         uses: actions/upload-artifact@v4
         with:
           name: civ6-lan-bridge-packet-tunnel-${{ matrix.arch }}
@@ -239,13 +299,30 @@ jobs:
         run: npm ci
       - name: Build macOS DMG candidate
         working-directory: mac-client
-        run: npm run tauri build -- --ci --no-sign --config src-tauri/tauri.ci.conf.json
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            npm run tauri build -- --ci --no-sign --config src-tauri/tauri.release.conf.json
+          else
+            npm run tauri build -- --ci --no-sign --config src-tauri/tauri.ci.conf.json
+          fi
       - name: Validate Packet Tunnel is embedded in the candidate App
         run: |
           APP_PATH="$(find mac-client/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$APP_PATH"
           test -d "$APP_PATH/Contents/PlugIns/PacketTunnel.appex"
           test -n "$(find "$APP_PATH/Contents/MacOS" -type f -perm -111 -print -quit)"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            test -f "$APP_PATH/Contents/embedded.provisionprofile"
+            test -f "$APP_PATH/Contents/PlugIns/PacketTunnel.appex/Contents/embedded.provisionprofile"
+          fi
+      - name: Sign, notarize, and staple macOS release DMG
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: mac-client/scripts/sign-and-notarize-macos.sh
       - name: Verify and mount macOS DMG candidate
         shell: bash
         run: |
@@ -308,14 +385,15 @@ jobs:
           cat > release/RELEASE_NOTES.md <<EOF
           ## Civ6 LAN Bridge ${GITHUB_REF_NAME}
 
-          Unsigned candidate packages built from commit ${GITHUB_SHA}.
+          The macOS package is Developer ID signed, hardened, notarized, and stapled.
+          The Windows package is currently an unsigned test installer.
 
           - Apple Silicon: \`civ6-lan-bridge-macos-arm64.dmg\`
           - Windows x64: \`civ6-lan-bridge-windows-x64-setup.exe\`
           - Checksums: \`SHA256SUMS\`
 
-          This is a test candidate. The Packet Tunnel/Civ VI data path and real
-          Civ VI room discovery still require validation on physical devices.
+          The Packet Tunnel/Civ VI data path and real Civ VI room discovery still
+          require validation on physical devices.
           EOF
       - name: Publish GitHub Release assets
         env:
