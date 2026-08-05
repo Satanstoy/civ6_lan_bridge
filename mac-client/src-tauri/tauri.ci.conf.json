@@ -1,9 +1,0 @@
-{
-  "bundle": {
-    "macOS": {
-      "files": {
-        "Library/SystemExtensions/PacketTunnel.systemextension": "../PacketTunnel/build/PacketTunnel.systemextension"
-      }
-    }
-  }
-}
